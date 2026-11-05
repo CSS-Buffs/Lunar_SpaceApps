@@ -1,71 +1,85 @@
-# Lunar_SpaceApps: 3D Moon from NASA LOLA data
+# Lunar_SpaceApps: a data-driven 3D Moon and orbit simulator
 
-An interactive 3D model of the Moon built from **NASA LRO Lunar Orbiter Laser Altimeter (LOLA)**
-elevation data, with a lunar gravity / orbit simulator. It is written in both **Python** and **MATLAB**.
+An interactive 3D model of the Moon and a high-fidelity lunar orbit simulator. Both are written in **Python** and **MATLAB**, and both are built from live NASA data services.
 
-The data is downloaded on first run from the NASA PDS Geosciences Node
-([LOLA GDR, cylindrical](https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/cylindrical/img/))
-into `data/`.
+| NASA source | What we use it for |
+|---|---|
+| **LRO LOLA** laser altimeter (PDS) | Global shape of the Moon (`LDEM_4/16/64`) and terrain for impact detection |
+| **NASA Moon Trek** (WMTS tiles and search API) | LRO WAC global mosaic as the true surface appearance, plus IAU feature names (maria, major craters, Apollo sites) |
+| **LROC QuickMap** (Lunaserv WMS, numeric layers) | GLD100 stereo terrain for ~100 m close-ups, TiO₂ abundance and the GRAIL free-air gravity map |
+| **JPL Horizons API** | Sun and Earth positions (third-body forces and real sunlight or phase for any date), LRO's real trajectory (initial state and ground truth), and sub-Earth/sub-solar points for checking orientation |
+| **GRAIL** GRGM1200A gravity (PDS) | Spherical-harmonic lunar gravity field (only the degrees you request are downloaded) |
+| NASA NAIF lunar frame kernel | Mean-Earth to Principal-Axis frame rotation (DE440) |
 
-| Grid       | Size          | Resolution  | File size |
-|------------|---------------|-------------|-----------|
-| `LDEM_4`   | 1440 × 720    | ~7.6 km/px  | 2 MB      |
-| `LDEM_16`  | 5760 × 2880   | ~1.9 km/px  | 33 MB     |
-| `LDEM_64`  | 23040 × 11520 | ~474 m/px   | 531 MB    |
-
-Radius = DN × 0.5 m + 1737.4 km, in the Mean-Earth / Polar-Axis frame, with longitude positive east.
+All downloads are cached in `data/`. Generated pages and plots go to `output/`.
 
 ## Python
 
 ```bash
 pip install -r python/requirements.txt
 cd python
-python moon_viewer.py                                  # global Moon in the browser
-python moon_viewer.py --stride 1 --exaggeration 5      # full LDEM_4 detail
-python moon_viewer.py --color gravity                  # or: slope, terrain
-python moon_viewer.py --ppd 16 --stride 1 --region -50 -35 -20 -5    # Tycho close-up
-python simulate_orbit.py --alt 50 --inc 90 --days 1    # LRO-like orbit
-python simulate_orbit.py --alt 3 --inc 30 --days 1     # low orbit, hits terrain
+python moon_viewer.py                                   # photo-textured Moon (Moon Trek WAC)
+python moon_viewer.py --date 2026-11-24T12:00 --labels  # real sunlight/phase (Horizons) + names
+python moon_viewer.py --date now                        # the Moon as it is lit right now
+python moon_viewer.py --color gravity                   # GRAIL free-air anomaly (our SH synthesis)
+python moon_viewer.py --color freeair | tio2 | slope | height
+python moon_viewer.py --region -45 -41.5 -13.5 -9 --source gld100 --stride 1 --exaggeration 2 \
+                      --date 2026-11-20T06:00           # Tycho close-up, GLD100 terrain at 128 px/deg
+python simulate_orbit.py --lro --epoch 2024-08-20T00:00 --days 1 --compare-degrees 2,20,60,100
+python simulate_orbit.py --alt 50 --inc 90 --days 2 --epoch 2026-11-20T00:00
+python simulate_orbit.py --alt 8 --ecc 0.002 --inc 85 --days 3 --degree 60   # ends in an impact
+python validate.py                                      # cross-checks against NASA data
 ```
 
-The viewer writes `output/*.html` and opens it in your browser. Drag to rotate, scroll to zoom,
-right-drag to pan and double-click to reset.
+The viewer writes an HTML page and opens it. Drag to rotate, scroll to zoom, right-drag to pan, double-click to reset.
 
-## MATLAB (R2019a+)
+## MATLAB (R2019b+)
 
 ```matlab
 cd matlab
-moon_viewer                         % rotate by dragging, zoom with scroll wheel
-moon_viewer(4, 1, 5)                % full LDEM_4 resolution, 5x relief
-moon_viewer(16, 1, 2, [-50 -35 340 355])   % Tycho close-up
-out = moon_orbit_sim('alt', 50, 'inc', 90, 'days', 1);
-out = moon_orbit_sim('alt', 3,  'inc', 30, 'days', 1);   % terrain impact
+moon_viewer                                             % Moon Trek texture, rotate/zoom
+moon_viewer('date','2026-11-24T12:00','labels',true)     % sunlight from Horizons + names
+moon_viewer('color','tio2')                              % QuickMap layers: tio2, freeair
+moon_viewer('region',[-45 -41.5 -13.5 -9],'source','gld100','exaggeration',2)
+out = moon_orbit_sim('lro',true,'epoch','2024-08-20T00:00:00','days',1,'degree',100);
+out = moon_orbit_sim('alt',50,'inc',90,'days',1);
 ```
 
-Controls at the bottom of the figure change the relief exaggeration, the colour field
-(elevation, gravity or slope) and the sun direction.
+The MATLAB code mirrors the Python implementation. It was written without access to MATLAB, so the Python side is the tested reference.
 
-## Physics model
+## Physics
 
-* **Gravity:** point mass + J2 + C22 from GRAIL GRGM1200A (GM = 4902.800 km³/s²), evaluated in the
-  body-fixed frame.
-* **Rotation:** synchronous rotation at the sidereal rate (27.3217 d). The Earth's tidal (third-body)
-  perturbation is applied from the body-fixed +X direction.
-* **Integration:** DOP853 (Python) / ode113 (MATLAB) with tight tolerances. Steps are capped at 10 s
-  so terrain crossings aren't missed. The run stops at **impact with the LOLA terrain**.
-* **Accuracy check:** the Jacobi constant (energy in the rotating frame) is exactly conserved by this
-  model. Its drift (~1e-14 relative over 1 day in Python) measures numerical error.
-* **Surface gravity map:** gravity plus centrifugal acceleration on the true LOLA surface.
+* **Gravity:** GRAIL GRGM1200A spherical harmonics (default degree 100, up to 1200 available). It uses a fully-normalised Cunningham V/W recursion, JIT-compiled with numba.
+* **Frames:** the simulation runs in the Moon-centred ICRF frame, which is what Horizons uses. Moon orientation comes from the IAU 2015 model with libration terms. GRAIL is evaluated in the DE440 Principal-Axis frame, and LOLA in the Mean-Earth frame.
+* **Perturbations:** Earth and Sun positions come from the Horizons API (cubic-Hermite interpolated). Cannonball solar radiation pressure with lunar shadow is optional.
+* **Integrator:** DOP853 in Python and ode113 in MATLAB, with tolerances of 1e-11. The run stops on impact with LOLA terrain.
 
-**Limitations:** gravity is degree 2 only. Real low orbits are strongly perturbed by mascons, so
-mission-grade work needs the full GRGM1200A spherical-harmonic field. Lunar obliquity (1.5°),
-libration and solar perturbation are also ignored.
+## Validation (`python validate.py` → `output/validation_report.md`)
+
+| Check | Result |
+|---|---|
+| Orientation vs Horizons sub-Earth/sub-solar points | ≤ 0.006° (≈190 m); NAIF documents ~0.005° for the IAU series |
+| SH gravity vs finite-difference potential | 7e-7 relative (finite-difference noise level) |
+| Our GRAIL free-air map vs QuickMap GRAIL map | correlation 0.88 |
+| LOLA vs independent GLD100 stereo terrain (near side, 0.05°) | median 3 m, robust σ 17 m |
+| 24 h prediction vs **real LRO** (3 epochs) | degree 2: 10–18 km · degree 60: 120–480 m · **degree 100–150: 33–133 m** |
+
+Two corrections came out of these checks:
+* **ME→PA rotation sign:** the sign of the NAIF ME→PA rotation was confirmed against LRO. The adopted convention is 2–5× more accurate than the opposite sign.
+* **QuickMap pixel registration:** QuickMap returns corner-registered pixels. Correcting for this improved the terrain and gravity comparisons.
+
+**Remaining limitations**
+* LRO maneuvers and momentum dumps are not modeled.
+* SRP uses a cannonball model and is off by default.
+* Moon Trek DEM tiles are 8-bit images, so numeric terrain comes from LOLA and QuickMap GLD100.
 
 ## Layout
 
 ```
-python/  lola_data.py  lunar_physics.py  moon_viewer.py  simulate_orbit.py
-matlab/  lola_read.m   lunar_constants.m lunar_gravity.m moon_viewer.m  moon_orbit_sim.m
-data/    downloaded LOLA files (git-ignored)
-output/  generated HTML / PNG (git-ignored)
+python/  nasa_http.py  horizons.py  quickmap.py  moontrek.py  lola_data.py  grail_gravity.py
+         lunar_frames.py  lunar_physics.py  moon_viewer.py  simulate_orbit.py  validate.py
+matlab/  nasa_get.m  horizons_time.m  horizons_vectors.m  quickmap_numeric.m  moontrek_mosaic.m
+         moontrek_features.m  lola_read.m  grail_load.m  grail_accel.m  lunar_orientation.m
+         lunar_constants.m  moon_viewer.m  moon_orbit_sim.m
+data/    cached NASA downloads (git-ignored)      output/  generated HTML/PNG/report (git-ignored)
 ```
