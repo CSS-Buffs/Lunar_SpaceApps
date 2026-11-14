@@ -787,6 +787,32 @@ document.addEventListener('keydown', e => {
 });
 
 /* ------------------------------------------------------------------ data loading */
+// Two ways to run: with the local server (python moon_app.py, any date, live JPL Horizons), or as a
+// static website (python build_site.py) where Sun/Earth positions are pre-computed per month.
+const STATIC = window.LUNAR_STATIC || null;
+const URLS = STATIC ? {stat: 'data/static.json', tex: 'data/texture.png'} : {stat: '/api/static', tex: '/api/texture.png'};
+const monthCache = new Map();
+async function staticTrack(start, days) {
+  let t0 = Date.parse(`${start}:00Z`); t0 -= t0 % HOUR;
+  const t1 = t0 + days * DAY, first = Date.parse(`${STATIC.first}-01T00:00:00Z`);
+  const [ly, lm] = STATIC.last.split('-').map(Number), end = Date.UTC(ly, lm, 1);
+  if (!(t0 >= first && t1 <= end))
+    throw new Error(`this website has Sun and Earth positions from ${STATIC.first} to ${STATIC.last}. `
+      + 'Pick a start date and span inside that range (or run python moon_app.py locally for any date).');
+  const sun = [], earth = [];
+  let gT0 = null;
+  for (let d = new Date(Date.UTC(new Date(t0).getUTCFullYear(), new Date(t0).getUTCMonth(), 1)); d.getTime() < t1; d.setUTCMonth(d.getUTCMonth() + 1)) {
+    const key = d.toISOString().slice(0, 7);
+    if (!monthCache.has(key)) monthCache.set(key, fetch(`data/track/${key}.json`).then(r => { if (!r.ok) throw new Error(`missing data for ${key}`); return r.json(); }));
+    const m = await monthCache.get(key);
+    if (gT0 === null) gT0 = m.t0_ms;
+    if (sun.length) { sun.length -= 3; earth.length -= 3; }   // months overlap by one hour: drop the duplicate
+    for (let i = 0; i < m.sun.length; i++) { sun.push(m.sun[i]); earth.push(m.earth[i]); }
+  }
+  const i0 = Math.round((t0 - gT0) / HOUR), n = Math.round(days * 24) + 1;
+  return {start, days, t0_ms: t0, dt_ms: HOUR, sun: sun.slice(3 * i0, 3 * (i0 + n)), earth: earth.slice(3 * i0, 3 * (i0 + n)),
+          source: 'JPL Horizons (pre-computed)'};
+}
 async function loadTrack() {
   const d = $('in-date').value, t = $('in-time').value || '00:00', days = +$('in-span').value;
   if (!d) return;
@@ -794,11 +820,17 @@ async function loadTrack() {
   $('date-status').className = 'status'; $('date-status').textContent = 'Querying JPL Horizons…';
   $('loading').hidden = false; $('loading').textContent = 'Querying JPL Horizons for the Sun and Earth…';
   try {
-    const r = await fetch(`/api/track?start=${encodeURIComponent(`${d}T${t}`)}&days=${days}`), j = await r.json();
-    if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+    let j;
+    if (STATIC) j = await staticTrack(`${d}T${t}`, days);
+    else {
+      const r = await fetch(`/api/track?start=${encodeURIComponent(`${d}T${t}`)}&days=${days}`); j = await r.json();
+      if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+    }
     S.track = j; S.t = j.t0_ms;
     $('sim-range').max = Math.round((spanEnd() - j.t0_ms) / (10 * MIN));
-    $('date-status').textContent = `Sun and Earth from JPL Horizons: ${j.days} days at ${j.dt_ms / MIN}-min steps.`;
+    $('date-status').textContent = STATIC
+      ? `Sun and Earth from JPL Horizons (pre-computed hourly, ${STATIC.first} to ${STATIC.last}): ${j.days} days.`
+      : `Sun and Earth from JPL Horizons: ${j.days} days at ${j.dt_ms / MIN}-min steps.`;
     if (G3.ready) { Plotly.purge(G3.div); G3.ready = false; if (S.view === '3d') build3D(); }
     $('loading').hidden = true;
     if (S.sel) select(S.sel.lat, S.sel.lon, S.sel.id); else renderTime();
@@ -808,7 +840,7 @@ async function loadTrack() {
   }
 }
 async function loadTexture() {
-  const img = new Image(); img.src = '/api/texture.png'; await img.decode();
+  const img = new Image(); img.src = URLS.tex; await img.decode();
   const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
   const ctx = c.getContext('2d'); ctx.drawImage(img, 0, 0);
   const d = ctx.getImageData(0, 0, c.width, c.height).data, g = new Uint8Array(c.width * c.height);
@@ -816,17 +848,25 @@ async function loadTexture() {
   S.tex = {g, tw: c.width, th: c.height};
 }
 async function init() {
-  const now = new Date(Date.now() - Date.now() % HOUR);
+  let now = new Date(Date.now() - Date.now() % HOUR);
+  if (STATIC) {                                           // keep the default start inside the pre-computed range
+    const lo = Date.parse(`${STATIC.first}-01T00:00:00Z`), [ly, lm] = STATIC.last.split('-').map(Number);
+    const hi = Date.UTC(ly, lm, 1) - 31 * DAY;
+    now = new Date(clamp(now.getTime(), lo, hi));
+    $('in-date').min = `${STATIC.first}-01`; $('in-date').max = new Date(Date.UTC(ly, lm, 0)).toISOString().slice(0, 10);
+    $('menu-date').querySelector('[data-act="date-reload"]').textContent = 'Reload Sun/Earth data';
+  }
   $('in-date').value = now.toISOString().slice(0, 10); $('in-time').value = now.toISOString().slice(11, 16);
   try {
-    const [stat] = await Promise.all([fetch('/api/static').then(r => r.json()), loadTexture()]);
+    const [stat] = await Promise.all([fetch(URLS.stat).then(r => r.json()), loadTexture()]);
     S.stat = stat;
     const m = stat.mesh;
     S.mesh = {lat: m.lat, lon: m.lon, nr: m.shape[0], nc: m.shape[1], exag: m.exag, h: new Int16Array(b64(m.h).buffer),
               nx: new Int8Array(b64(m.nx).buffer), ny: new Int8Array(b64(m.ny).buffer), nz: new Int8Array(b64(m.nz).buffer), refl: b64(m.refl)};
     S.dem = {h: new Int16Array(b64(stat.dem.h).buffer), NR: stat.dem.shape[0], NC: stat.dem.shape[1], ppd: stat.dem.ppd};
   } catch (err) {
-    $('loading').textContent = `Could not load the Moon data (${err.message}). Start the app with: python moon_app.py`; return;
+    $('loading').textContent = STATIC ? `Could not load the Moon data (${err.message}).`
+      : `Could not load the Moon data (${err.message}). Start the app with: python moon_app.py`; return;
   }
   Object.values(MAPS).forEach(buildMap);
   renderLibrary();

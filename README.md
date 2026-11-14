@@ -33,6 +33,20 @@ The panels follow `wireframe/lunar_wireframe.png`. They are dark, floating windo
 
 Visibility takes the terrain into account. For each site the app traces the skyline over LOLA heights (720 azimuths, out to 600 km, with lunar curvature). The Sun or Earth counts as visible only while it is above that skyline.
 
+### Website (static hosting)
+
+The planner can also run as a static website, with no Python server:
+
+```bash
+cd python
+python build_site.py                      # -> site/ (about 13 MB)
+python -m http.server -d ../site 8000     # preview at http://localhost:8000
+```
+
+Browsers can't call the JPL Horizons API directly, so the build pre-computes hourly Sun and Earth positions, one small file per month. By default it covers 2024-01 to 2028-12; use `--first` and `--last` to change the range. Everything else works as in `moon_app.py`.
+
+**GitHub Pages:** `.github/workflows/pages.yml` builds the site and deploys it on every push to `main`, or when run by hand from the Actions tab. To turn it on, open the repository's Settings → Pages and set Source to **GitHub Actions**. The site will be at `https://<owner>.github.io/<repo>/`.
+
 ## Python
 
 ```bash
