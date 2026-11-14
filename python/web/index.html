@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lunar Site Planner</title>
+<link rel="stylesheet" href="app.css">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+
+<!-- ============================ SIMULATION (full screen) ============================ -->
+<main id="stage">
+  <canvas id="globe2d" hidden></canvas>
+  <div id="globe3d"></div>
+  <div class="loading" id="loading">Loading NASA data…</div>
+</main>
+
+<div id="sky-hud" hidden>
+  <div class="hud-title" id="hud-title"></div>
+  <div class="hud-row"><b id="hud-word"></b></div>
+  <div class="hud-row"><span class="muted">Sunlight here</span><div class="meter"><i id="hud-meter"></i></div><b id="hud-irr"></b></div>
+  <div class="hud-detail" id="hud-detail"></div>
+  <div class="hud-btns">
+    <button data-look="sun">Look at Sun</button><button data-look="earth">Look at Earth</button><button data-look="all">360° panorama</button>
+  </div>
+</div>
+
+<div id="topbar">
+  <div class="title">
+    <b>The Moon from NASA data</b>
+    <span>LOLA shape · Moon Trek WAC · JPL Horizons Sun &amp; Earth</span>
+  </div>
+  <span class="hint" id="hint">Zoom in / zoom out with mouse wheel · drag to rotate · click to select a point</span>
+  <div class="toggle">
+    <button id="v2d" title="View from the selected site">2D</button><button id="v3d" class="active" title="The whole Moon">3D</button>
+  </div>
+  <button class="tool-btn" id="min-all" title="Minimize or restore all panels">Minimize all</button>
+  <button class="tool-btn" id="reset-layout" title="Put all panels back in their default places and sizes">Reset panels</button>
+</div>
+
+<!-- ============================ FLOATING PANELS ============================ -->
+<section class="win" id="data-panel" data-dock="left">
+  <header class="win-head">
+    <h2>Data</h2>
+    <div class="win-tools">
+      <button class="menu-btn" data-menu="menu-data" aria-label="Data menu">&#9776;</button>
+      <button class="win-min" aria-label="Minimize">&#8211;</button>
+    </div>
+  </header>
+  <div class="menu" id="menu-data">
+    <button data-act="export-csv">Export windows (CSV)</button>
+    <button data-act="copy-summary">Copy summary</button>
+  </div>
+  <div class="win-body">
+    <div class="tabs">
+      <button class="tab active" data-tab="summary">Data summary</button>
+      <button class="tab" data-tab="compare">Compare data</button>
+    </div>
+    <div class="tab-body" id="tab-summary">
+      <div class="kv"><span>Communication duration</span><b class="chip" id="m-comm">[ hh:mm ]</b></div>
+      <div class="kv"><span>Sunlight duration</span><b class="chip" id="m-sun">[ hh:mm ]</b></div>
+      <div class="kv"><span>Solar elevation angle</span><b class="chip" id="m-solel">[ ° ]</b></div>
+      <div class="kv kv-click" id="m-ewin-row" title="Show all Earth visibility windows">
+        <span>Earth visibility windows</span><b class="chip" id="m-ewin">[ start - end ]</b></div>
+      <div id="m-ewin-list" class="win-list" hidden></div>
+      <div class="bars" id="m-bars"></div>
+      <p class="note" id="m-note">Pick a site on the mini map or the globe.</p>
+    </div>
+    <div class="tab-body" id="tab-compare" hidden>
+      <div class="seg">
+        <button class="seg-btn active" data-cmp="sites">Saved sites</button>
+        <button class="seg-btn" data-cmp="dates">Dates</button>
+      </div>
+      <div id="cmp-table" class="cmp"></div>
+      <button class="btn small" id="cmp-add-date" hidden>+ Add current date span</button>
+      <p class="note">Compare tab: same metrics side by side for saved sites or dates.</p>
+    </div>
+  </div>
+</section>
+
+<section class="win" id="loc-panel" data-dock="left">
+  <header class="win-head">
+    <h2>Location on the Moon</h2>
+    <div class="win-tools">
+      <button class="menu-btn" data-menu="menu-loc" aria-label="Location menu">&#9776;</button>
+      <button class="win-min" aria-label="Minimize">&#8211;</button>
+    </div>
+  </header>
+  <div class="menu" id="menu-loc">
+    <button data-act="save-site">Save selected point as a site</button>
+    <button data-act="rename-site">Rename selected site</button>
+    <button data-act="delete-site">Delete selected site</button>
+    <button data-act="reset-sites">Reset saved sites</button>
+    <button data-act="clear-sites">Remove all saved sites</button>
+  </div>
+  <div class="win-body">
+    <div class="loc-grid">
+      <div class="minimap" id="minimap">
+        <div class="map-hint">Mini map of lunar surface (click to place a point)</div>
+        <canvas id="map-eq" title="Click to place a point"></canvas>
+        <div class="poles">
+          <figure><canvas id="map-np" title="North polar region (60-90° N)"></canvas><figcaption>North pole</figcaption></figure>
+          <figure><canvas id="map-sp" title="South polar region (60-90° S)"></canvas><figcaption>South pole</figcaption></figure>
+        </div>
+        <div class="coord-entry">
+          <label>Lat <input id="in-lat" type="number" step="0.01" min="-90" max="90"></label>
+          <label>Lon <input id="in-lon" type="number" step="0.01" min="-180" max="360"></label>
+          <button class="btn small" id="in-go">Go</button>
+        </div>
+      </div>
+      <div class="sites">
+        <button class="btn" id="lib-btn" title="Missions and known sites to view and compare">Library of sites</button>
+        <div class="label">Saved sites</div>
+        <div id="site-list"></div>
+      </div>
+    </div>
+    <button class="btn wide" id="drop-btn">+ Drop new point</button>
+  </div>
+</section>
+
+<section class="win" id="lib-panel" data-dock="float" hidden>
+  <header class="win-head">
+    <div><h2>Library of sites</h2><div class="sub"><span id="lib-count"></span> · missions and known places</div></div>
+    <div class="win-tools">
+      <button class="win-min" aria-label="Minimize">&#8211;</button>
+      <button class="menu-btn" id="lib-close" aria-label="Close" title="Close">&times;</button>
+    </div>
+  </header>
+  <div class="win-body">
+    <input id="lib-search" type="search" placeholder="Search missions and sites (e.g. Apollo, Chang'e, crater)…">
+    <p class="note">Tick a site to add it to your saved sites and compare it in <b>Data → Compare data</b>.
+      <b>View</b> selects it in the simulation. ≈ marks approximate positions.</p>
+    <div id="lib-list"></div>
+  </div>
+</section>
+
+<section class="win" id="date-panel" data-dock="right">
+  <header class="win-head">
+    <h2>Start date + time</h2>
+    <div class="win-tools">
+      <button class="menu-btn" data-menu="menu-date" aria-label="Date menu">&#9776;</button>
+      <button class="win-min" aria-label="Minimize">&#8211;</button>
+    </div>
+  </header>
+  <div class="menu" id="menu-date">
+    <button data-act="date-now">Set to now (UTC)</button>
+    <button data-act="date-reload">Reload from JPL Horizons</button>
+  </div>
+  <div class="win-body">
+    <label class="field">Date<input id="in-date" type="date"></label>
+    <label class="field">Time (UTC)<input id="in-time" type="time"></label>
+    <label class="field">Simulation span
+      <select id="in-span">
+        <option value="1">1 day</option><option value="3">3 days</option><option value="7">7 days</option>
+        <option value="14">14 days</option><option value="30" selected>30 days</option>
+        <option value="60">60 days</option><option value="90">90 days</option>
+      </select></label>
+    <div class="status" id="date-status"></div>
+  </div>
+</section>
+
+<section class="win" id="angle-panel" data-dock="right">
+  <header class="win-head">
+    <div><h2>Location + angle data</h2><div class="sub">Sun and Earth at the selected site and time</div></div>
+    <div class="win-tools"><button class="win-min" aria-label="Minimize">&#8211;</button></div>
+  </header>
+  <div class="win-body">
+    <div class="kv"><span>Site lat / lon</span><b class="chip" id="a-site">[ °, ° ]</b></div>
+    <div class="kv"><span>Sun elevation</span><b class="chip" id="a-sel">[ ° ]</b></div>
+    <div class="kv"><span>Sun azimuth</span><b class="chip" id="a-saz">[ ° ]</b></div>
+    <div class="kv"><span id="a-sset-l">Time to sunset</span><b class="chip" id="a-sset">[ hh:mm ]</b></div>
+    <div class="kv"><span>Earth elevation</span><b class="chip" id="a-eel">[ ° ]</b></div>
+    <div class="kv"><span>Earth azimuth</span><b class="chip" id="a-eaz">[ ° ]</b></div>
+    <div class="kv"><span id="a-eset-l">Time to Earthset</span><b class="chip" id="a-eset">[ hh:mm ]</b></div>
+    <div class="state" id="a-state"></div>
+    <div class="horizon-box">
+      <div class="label">Horizon panorama <span class="muted">(terrain skyline, Sun and Earth paths)</span></div>
+      <svg id="panorama" viewBox="0 0 320 150" preserveAspectRatio="none"></svg>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ TIME BAR ============================ -->
+<section class="timebar">
+  <div class="tb-row">
+    <div class="simtime"><b>Simulation time</b> <span id="sim-time">[ date hh:mm ]</span></div>
+    <input type="range" id="sim-range" min="0" max="1000" value="0" step="1" aria-label="Simulation time">
+    <div class="transport">
+      <button id="t-back-day" title="Back 1 day">&#9665;&#9665;</button>
+      <button id="t-back" title="Back one step (←)">&#9665;</button>
+      <button id="t-play" class="active" title="Play / pause (space)">&#9655;</button>
+      <button id="t-fwd-day" title="Forward 1 day">&#9655;&#9655;</button>
+    </div>
+  </div>
+  <div class="pos-info" id="pos-info"></div>
+</section>
+
+<div class="toast" id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

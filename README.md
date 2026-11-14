@@ -13,6 +13,26 @@ An interactive 3D model of the Moon and a high-fidelity lunar orbit simulator. B
 
 All downloads are cached in `data/`. Generated pages and plots go to `output/`.
 
+## Lunar site planner app (Python)
+
+```bash
+pip install -r python/requirements.txt
+cd python
+python moon_app.py          # prepares NASA data once, then serves http://localhost:8050 and opens it
+```
+
+The panels follow `wireframe/lunar_wireframe.png`. They are dark, floating windows: drag one by its title bar, resize it from its bottom-right corner, and minimise it with – (or double-click the title). The top bar has **Minimize all** and **Reset panels**. The app remembers positions and sizes.
+
+* **3D:** a full-screen, sunlit Moon (LOLA shape, Moon Trek WAC texture) with the Sun and Earth in their true directions from JPL Horizons, in the same style as `moon_viewer.py`. Drag to rotate, use the mouse wheel to zoom, and click to select a point.
+* **2D (view from the site):** what you would see standing at the selected site. It shows the LOLA terrain skyline, the Sun and Earth at their true azimuth and elevation, Earth's phase, and their paths over the span. The sunlight meter gives W/m² on level ground and on a Sun-facing panel, including when the Sun is partly hidden by terrain. Drag to look around, use the mouse wheel to zoom, and click **Look at Sun**, **Look at Earth** or **360° panorama**.
+* **Location on the Moon:** a mini map (global plus both poles) with day and night shading. It also has coordinate entry and saved sites named after missions and places, kept in the browser. **+ Drop new point** adds your own point.
+* **Library of sites:** 71 searchable missions and known places (Apollo, Surveyor, Luna and Lunokhod, Chang'e, recent landers, polar sites, craters, maria and science targets). **View** shows a site. Ticking one, or using **Compare all** for a group, adds it to the saved sites so it is compared in **Data → Compare data**.
+* **Location + angle data:** Sun and Earth elevation and azimuth at the site, time to sunset or sunrise and to Earthset or Earthrise, and a horizon panorama.
+* **Data:** communication (Earth line of sight) and sunlight durations, solar elevation, and Earth visibility windows. **Compare data** shows saved sites or date spans side by side. The ≡ menus export the windows as CSV or copy a summary.
+* **Start date + time / simulation time:** any start date and a 1 to 90 day span (fetched from Horizons), with a time slider and ◁◁ / ◁ / ▷ / ▷▷ controls (−1 day, −1 step, play, +1 day). The arrow keys and the space bar also work.
+
+Visibility takes the terrain into account. For each site the app traces the skyline over LOLA heights (720 azimuths, out to 600 km, with lunar curvature). The Sun or Earth counts as visible only while it is above that skyline.
+
 ## Python
 
 ```bash
