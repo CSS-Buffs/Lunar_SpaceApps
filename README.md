@@ -21,6 +21,8 @@ cd python
 python moon_viewer.py                                   # photo-textured Moon (Moon Trek WAC)
 python moon_viewer.py --date 2026-11-24T12:00 --labels  # real sunlight/phase (Horizons) + names
 python moon_viewer.py --date now                        # the Moon as it is lit right now
+python moon_viewer.py --timeline 30                     # time slider: Sun + Earth from Horizons; click a
+                                                        # site for terrain-aware Sun/Earth visibility windows
 python moon_viewer.py --color gravity                   # GRAIL free-air anomaly (our SH synthesis)
 python moon_viewer.py --color freeair | tio2 | slope | height
 python moon_viewer.py --region -45 -41.5 -13.5 -9 --source gld100 --stride 1 --exaggeration 2 \

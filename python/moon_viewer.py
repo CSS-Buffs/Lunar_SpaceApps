@@ -88,13 +88,36 @@ def sun_and_earth_me(jd_tdb):
 
 def sun_earth_track(jd0, days, step_h):
     """Sun and Earth around the Moon over a time span, from JPL Horizons, in the ME frame.
-    Returns times (TDB JD) and (N,3) Moon-centred positions in metres."""
-    jds = jd0 + np.arange(0.0, days * 24.0 + 1e-9, step_h) / 24.0
-    eph = horizons.perturber_ephemerides(jds[0], jds[-1], pad_days=0.2)
-    R = lf.icrf_to_me(jds)
-    sun = np.einsum("nij,nj->ni", R, eph["sun"].position(jds))
-    earth = np.einsum("nij,nj->ni", R, eph["earth"].position(jds))
-    return jds, sun, earth
+    Returns dicts {jd (TDB), sun, earth (N,3) Moon-centred metres} at the slider step and at a
+    finer step (<= 1 h) used for the site visibility windows."""
+    eph = horizons.perturber_ephemerides(jd0, jd0 + days, pad_days=0.2)
+
+    def at(step):
+        jds = jd0 + np.arange(0.0, days * 24.0 + 1e-9, step) / 24.0
+        R = lf.icrf_to_me(jds)
+        return dict(jd=jds, sun=np.einsum("nij,nj->ni", R, eph["sun"].position(jds)),
+                    earth=np.einsum("nij,nj->ni", R, eph["earth"].position(jds)))
+    return at(step_h), at(min(1.0, step_h))
+
+
+def jd_tdb_to_unix_ms(jd):
+    return np.round((np.asarray(jd) - 2440587.5) * 86400e3 - horizons.TDB_MINUS_UTC * 1e3).astype(np.int64)
+
+
+def site_meta(fine, horizon_ppd, exaggeration):
+    """Data for the in-page site picker: a LOLA height grid for terrain horizons and a fine
+    Sun/Earth track (Moon-centred ME, km) for visibility windows."""
+    import base64
+    dem = lola_data.load(horizon_ppd)
+    hgt = np.clip(np.round(dem.height_m), -32767, 32767).astype("<i2")
+    return dict(
+        dem=base64.b64encode(hgt.tobytes()).decode("ascii"), dem_shape=list(hgt.shape),
+        dem_ppd=horizon_ppd, r_moon_km=R_LOLA / 1e3, exag=exaggeration,
+        t0_ms=int(jd_tdb_to_unix_ms(fine["jd"][0])),
+        dt_ms=int(round((fine["jd"][1] - fine["jd"][0]) * 86400e3)) if len(fine["jd"]) > 1 else 3600000,
+        sun=np.round(fine["sun"] / 1e3).astype(np.int64).ravel().tolist(),
+        earth=np.round(fine["earth"] / 1e3, 1).ravel().tolist(),
+    )
 
 
 def phase_name(frac, waxing):
@@ -154,8 +177,8 @@ TIMELINE_JS = r"""
   const iSun = idx('Sun'), iEarth = idx('Earth');
 
   document.body.insertAdjacentHTML('beforeend', `
-   <div id="tl" style="position:fixed;left:50%;bottom:14px;transform:translateX(-50%);
-        width:min(760px,calc(100vw - 32px));background:rgba(20,20,28,.88);color:#eee;
+   <div id="tl" style="position:fixed;left:16px;bottom:14px;
+        width:min(760px,calc(100vw - 32px - var(--site-w, 0px)));background:rgba(20,20,28,.88);color:#eee;
         font:13px system-ui,sans-serif;padding:10px 14px;border-radius:10px;z-index:10;
         box-shadow:0 2px 12px rgba(0,0,0,.6)">
      <div style="display:flex;gap:10px;align-items:center">
@@ -199,6 +222,7 @@ TIMELINE_JS = r"""
                   [`Earth: ${T.earth_km[k].toLocaleString()} km`, `Earth: ${T.earth_km[k].toLocaleString()} km`]]},
       [iSun, iEarth]);
     await Plotly.restyle(gd, {surfacecolor: [surfacecolor(k)]}, [0]);
+    window.dispatchEvent(new CustomEvent('tl-step', {detail: k}));
     busy = false;
     if (pending !== null) { const p = pending; pending = null; show(p); }
   }
@@ -215,6 +239,280 @@ TIMELINE_JS = r"""
     }, 120);
   });
   show(0);
+})();
+"""
+
+SITE_JS = r"""
+(function () {
+  const gd = document.getElementById('{plot_id}');
+  const T = gd.layout.meta.timeline, S = T.site;
+/*CORE*/
+  const Core = (function (S) {
+    const D2R = Math.PI / 180, R2D = 180 / Math.PI, RM = S.r_moon_km, N_AZ = 720;
+    const dem = new Int16Array(Uint8Array.from(atob(S.dem), c => c.charCodeAt(0)).buffer);
+    const [NR, NC] = S.dem_shape, ppd = S.dem_ppd, nF = S.sun.length / 3;
+    const t1 = S.t0_ms + (nF - 1) * S.dt_ms;
+
+    function height(lat, lon) {                       // LOLA height [m], bilinear
+      let r = Math.min(Math.max((90 - lat) * ppd - 0.5, 0), NR - 1);
+      const c = (((lon % 360) + 360) % 360) * ppd - 0.5;
+      const r0 = Math.min(Math.floor(r), NR - 2), fr = r - r0, cf = Math.floor(c), fc = c - cf;
+      const c0 = ((cf % NC) + NC) % NC, c1 = (c0 + 1) % NC, i0 = r0 * NC, i1 = i0 + NC;
+      return (dem[i0 + c0] * (1 - fc) + dem[i0 + c1] * fc) * (1 - fr) +
+             (dem[i1 + c0] * (1 - fc) + dem[i1 + c1] * fc) * fr;
+    }
+
+    // Terrain horizon: for each azimuth, march along the great circle and keep the highest
+    // elevation angle of the terrain, including the curvature of the Moon.
+    const DIST = []; for (let d = 0.5; d < 600; d += Math.max(0.5, d * 0.015)) DIST.push(d);
+    function horizon(lat, lon, ro) {
+      const p1 = lat * D2R, sp = Math.sin(p1), cp = Math.cos(p1), hz = new Float32Array(N_AZ);
+      for (let k = 0; k < N_AZ; k++) {
+        const az = k * 2 * Math.PI / N_AZ, ca = Math.cos(az), sa = Math.sin(az);
+        let best = -90;
+        for (const d of DIST) {
+          const del = d / RM, cd = Math.cos(del), sd = Math.sin(del);
+          const sp2 = Math.min(1, Math.max(-1, sp * cd + cp * sd * ca));
+          const lon2 = lon + Math.atan2(sa * sd * cp, cd - sp * sp2) * R2D;
+          const rt = RM + height(Math.asin(sp2) * R2D, lon2) / 1000;
+          const el = Math.atan2(rt * cd - ro, rt * sd) * R2D;
+          if (el > best) best = el;
+        }
+        hz[k] = best;
+      }
+      return hz;
+    }
+
+    function site(lat, lon, mast_m = 2) {
+      lat = Math.max(-89.99, Math.min(89.99, lat));
+      const h_m = height(lat, lon), ro = RM + (h_m + mast_m) / 1000;
+      const la = lat * D2R, lo = lon * D2R;
+      const u = [Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la)];
+      const e = [-Math.sin(lo), Math.cos(lo), 0];
+      const n = [-Math.sin(la) * Math.cos(lo), -Math.sin(la) * Math.sin(lo), Math.cos(la)];
+      return {lat, lon, h_m, u, e, n, p: u.map(x => x * ro), hz: horizon(lat, lon, ro)};
+    }
+    function hzAt(hz, az) {
+      const x = az / 360 * N_AZ, k0 = Math.floor(x), f = x - k0;
+      return hz[k0 % N_AZ] * (1 - f) + hz[(k0 + 1) % N_AZ] * f;
+    }
+    function bodyAt(arr, t) {                         // Moon-centred ME position [km]
+      const x = Math.min(Math.max((t - S.t0_ms) / S.dt_ms, 0), nF - 1);
+      const i = Math.min(Math.floor(x), Math.max(nF - 2, 0)), f = x - i, j = Math.min(i + 1, nF - 1);
+      return [0, 1, 2].map(c => arr[3 * i + c] * (1 - f) + arr[3 * j + c] * f);
+    }
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    function state(st, body, t) {
+      const v = bodyAt(S[body], t), d = [v[0] - st.p[0], v[1] - st.p[1], v[2] - st.p[2]];
+      const r = Math.hypot(d[0], d[1], d[2]);
+      const el = Math.asin(dot(d, st.u) / r) * R2D;
+      const az = ((Math.atan2(dot(d, st.e), dot(d, st.n)) * R2D) + 360) % 360;
+      const hz = hzAt(st.hz, az), rad = Math.asin((body === 'sun' ? 695700 : 6371) / r) * R2D;
+      return {el, az, r, hz, rad, margin: el - hz};
+    }
+    // Visibility (body centre above the terrain horizon), sampled every stepMin minutes with
+    // rise/set times refined by linear interpolation of the margin.
+    function intervals(ts, m) {
+      const out = [];
+      let a = m[0] > 0 ? ts[0] : null, openA = m[0] > 0;
+      for (let i = 1; i < ts.length; i++) {
+        if ((m[i - 1] > 0) === (m[i] > 0)) continue;
+        const tc = ts[i - 1] + (ts[i] - ts[i - 1]) * m[i - 1] / (m[i - 1] - m[i]);
+        if (m[i] > 0) { a = tc; openA = false; } else { out.push({a, b: tc, openA, openB: false}); a = null; }
+      }
+      if (a !== null) out.push({a, b: ts[ts.length - 1], openA, openB: true});
+      return out;
+    }
+    function windows(st, stepMin = 10) {
+      const ts = [], sun = [], earth = [], both = [];
+      for (let t = S.t0_ms; t <= t1 + 1; t += stepMin * 60000) {
+        const ms = state(st, 'sun', t).margin, me = state(st, 'earth', t).margin;
+        ts.push(t); sun.push(ms); earth.push(me); both.push(Math.min(ms, me));
+      }
+      const frac = m => m.filter(x => x > 0).length / m.length;
+      return {ts, sun: intervals(ts, sun), earth: intervals(ts, earth), both: intervals(ts, both),
+              frac: {sun: frac(sun), earth: frac(earth), both: frac(both)}};
+    }
+    return {site, state, windows, height, hzAt, N_AZ, t0: S.t0_ms, t1};
+  })(S);
+/*ENDCORE*/
+
+  const RM = S.r_moon_km, R2D = 180 / Math.PI;
+  const iSite = gd.data.findIndex(d => d.name === 'Selected site');
+  const range = document.getElementById('tl-range');
+  let st = null, win = null, paths = null, curK = 0;
+
+  document.head.insertAdjacentHTML('beforeend', `<style>
+    :root { --site-w: 368px; }
+    html, body { margin: 0; overflow: hidden; background: #000; }
+    #site { position: fixed; top: 70px; right: 12px; width: 340px; max-height: calc(100vh - 90px);
+      overflow: auto; background: rgba(20,20,28,.92); color: #eee; font: 13px system-ui, sans-serif;
+      padding: 12px 14px; border-radius: 10px; z-index: 11; box-shadow: 0 2px 12px rgba(0,0,0,.6); }
+    #site input { width: 76px; background: #111; color: #eee; border: 1px solid #555; border-radius: 5px; padding: 3px 5px; }
+    #site button { background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+    #site .muted { opacity: .7; font-size: 12px; }
+    #site .row { display: flex; gap: 8px; align-items: baseline; margin: 3px 0; }
+    #site .tag { display: inline-block; min-width: 52px; font-weight: 600; }
+    #site details { margin-top: 8px; } #site summary { cursor: pointer; font-weight: 600; }
+    #site ol { margin: 4px 0 0; padding-left: 20px; font-size: 12px; line-height: 1.55; }
+    #site svg text { font: 10px system-ui, sans-serif; fill: #bbb; }
+    #site.collapsed #site-body { display: none; }
+    @media (max-width: 900px) {
+      :root { --site-w: 0px; }
+      #site { top: auto; bottom: 118px; left: 16px; right: 16px; width: auto; max-height: 42vh; }
+    }</style>`);
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="site">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b style="font-size:14px">Site visibility</b>
+        <button id="site-hide" title="Collapse">–</button>
+      </div>
+      <div id="site-body">
+        <div class="muted" style="margin:4px 0 8px">Click anywhere on the Moon, or type coordinates
+          (°, east longitude positive).</div>
+        <div class="row">
+          <label>Lat <input id="site-lat" type="number" step="0.01" min="-90" max="90"></label>
+          <label>Lon <input id="site-lon" type="number" step="0.01" min="-360" max="360"></label>
+          <button id="site-go">Go</button>
+        </div>
+        <div id="site-out"></div>
+      </div>
+    </div>`);
+  const $ = id => document.getElementById(id);
+  $('site-hide').onclick = () => {
+    const c = $('site').classList.toggle('collapsed');
+    $('site-hide').textContent = c ? '+' : '–';
+  };
+
+  const fmtLat = v => `${Math.abs(v).toFixed(3)}° ${v >= 0 ? 'N' : 'S'}`;
+  const fmtLon = v => { v = ((v + 540) % 360) - 180; return `${Math.abs(v).toFixed(3)}° ${v >= 0 ? 'E' : 'W'}`; };
+  const fmtT = t => new Date(t).toISOString().slice(5, 16).replace('T', ' ');
+  const fmtDur = ms => { const h = ms / 3.6e6; return h >= 48 ? `${Math.floor(h / 24)} d ${Math.round(h % 24)} h`
+                                                              : `${Math.floor(h)} h ${Math.round((h % 1) * 60)} min`; };
+  const COL = {sun: '#ffcc33', earth: '#4da6ff', both: '#7ee08a'};
+
+  function select(lat, lon) {
+    $('site-lat').value = lat.toFixed(3);
+    $('site-lon').value = (((lon + 540) % 360) - 180).toFixed(3);
+    $('site-out').innerHTML = '<div class="muted" style="margin-top:10px">Computing terrain horizon…</div>';
+    setTimeout(() => {
+      st = Core.site(lat, lon);
+      win = Core.windows(st);
+      paths = {sun: [], earth: []};
+      for (let t = Core.t0; t <= Core.t1; t += 3600000)
+        for (const b of ['sun', 'earth']) { const s = Core.state(st, b, t); paths[b].push([s.az, s.el]); }
+      const R = (RM * 1000 + S.exag * st.h_m) / 1000 + 8;
+      Plotly.restyle(gd, {x: [[st.u[0] * R]], y: [[st.u[1] * R]], z: [[st.u[2] * R]],
+                          hovertext: [[`Site ${fmtLat(st.lat)}, ${fmtLon(st.lon)}`]]}, [iSite]);
+      render();
+    }, 20);
+  }
+
+  function statusLine(body, k) {
+    const s = Core.state(st, body, T.t_ms[k]);
+    let txt, col;
+    if (s.margin > s.rad) { txt = `Visible, ${s.margin.toFixed(1)}° above the terrain`; col = '#7ee08a'; }
+    else if (s.margin > -s.rad) { txt = 'Partly visible (disc on the horizon line)'; col = '#ffd166'; }
+    else if (s.el > 0) { txt = `Blocked by terrain (${(-s.margin).toFixed(1)}° below the ridge)`; col = '#ff7b7b'; }
+    else { txt = 'Below the horizon'; col = '#ff7b7b'; }
+    return `<div class="row"><span class="tag" style="color:${COL[body]}">${body === 'sun' ? 'Sun' : 'Earth'}</span>
+      <span><span style="color:${col}">${txt}</span><br><span class="muted">elevation ${s.el.toFixed(2)}°,
+      azimuth ${s.az.toFixed(1)}°, terrain horizon ${s.hz.toFixed(2)}°</span></span></div>`;
+  }
+
+  function bars(k) {
+    const W = 312, L = 44, H = 16, span = Core.t1 - Core.t0, x = t => L + (t - Core.t0) / span * (W - L);
+    let g = '';
+    [['sun', 'Sun'], ['earth', 'Earth'], ['both', 'Both']].forEach(([b, name], r) => {
+      const y = 4 + r * (H + 6);
+      g += `<text x="0" y="${y + 12}">${name}</text><rect x="${L}" y="${y}" width="${W - L}" height="${H}" fill="#2a2a33"/>`;
+      for (const w of win[b]) g += `<rect x="${x(w.a)}" y="${y}" width="${Math.max(1, x(w.b) - x(w.a))}" height="${H}" fill="${COL[b]}"/>`;
+    });
+    const cx = x(T.t_ms[k]);
+    g += `<line x1="${cx}" x2="${cx}" y1="0" y2="70" stroke="#fff" stroke-width="1.5"/>`;
+    g += `<text x="${L}" y="82">${fmtT(Core.t0)}</text><text x="${W}" y="82" text-anchor="end">${fmtT(Core.t1)}</text>`;
+    return `<svg id="site-bars" width="${W}" height="86" style="cursor:pointer;display:block;margin-top:6px">${g}</svg>`;
+  }
+
+  function panorama(k) {
+    const W = 312, H = 160, pl = 26, pb = 16, hz = st.hz;
+    let hmax = -90, hmin = 90; hz.forEach(v => { hmax = Math.max(hmax, v); hmin = Math.min(hmin, v); });
+    const y0 = Math.floor(Math.min(-2, hmin - 1)), y1 = Math.ceil(Math.min(90, Math.max(10, hmax + 6)));
+    const X = az => pl + az / 360 * (W - pl), Y = el => (H - pb) * (1 - (el - y0) / (y1 - y0));
+    let g = `<rect x="${pl}" y="0" width="${W - pl}" height="${H - pb}" fill="#0b0d18"/>`;
+    let pts = `${X(0)},${Y(y0)} `;
+    for (let i = 0; i <= Core.N_AZ; i++) pts += `${X(i * 360 / Core.N_AZ)},${Y(Math.max(y0, hz[i % Core.N_AZ]))} `;
+    g += `<polygon points="${pts}${X(360)},${Y(y0)}" fill="#4a4a52" stroke="#8a8a90" stroke-width="1"/>`;
+    if (y0 < 0) g += `<line x1="${pl}" x2="${W}" y1="${Y(0)}" y2="${Y(0)}" stroke="#666" stroke-dasharray="3 3"/>`;
+    for (const b of ['sun', 'earth'])
+      for (const [az, el] of paths[b]) if (el >= y0 && el <= y1)
+        g += `<circle cx="${X(az)}" cy="${Y(el)}" r="1" fill="${COL[b]}" opacity=".45"/>`;
+    for (const b of ['sun', 'earth']) {
+      const s = Core.state(st, b, T.t_ms[k]), cx = X(s.az);
+      if (s.el > y1) g += `<path d="M${cx - 5},10 L${cx + 5},10 L${cx},2 Z" fill="${COL[b]}"/>
+                           <text x="${cx + 7}" y="10" style="fill:${COL[b]}">${s.el.toFixed(0)}°</text>`;
+      else if (s.el >= y0) g += `<circle cx="${cx}" cy="${Y(s.el)}" r="${b === 'sun' ? 5 : 4}" fill="${COL[b]}" stroke="#000"/>`;
+    }
+    [[0, 'N'], [90, 'E'], [180, 'S'], [270, 'W'], [360, 'N']].forEach(([a, n]) =>
+      g += `<text x="${X(a)}" y="${H - 3}" text-anchor="middle">${n}</text>`);
+    [y0, 0, y1].filter((v, i, a) => a.indexOf(v) === i).forEach(v =>
+      g += `<text x="${pl - 3}" y="${Math.min(H - pb, Math.max(9, Y(v) + 3))}" text-anchor="end">${v}°</text>`);
+    return `<svg width="${W}" height="${H}" style="display:block;margin-top:4px">${g}</svg>`;
+  }
+
+  function list(b) {
+    const w = win[b];
+    if (!w.length) return '<div class="muted">Never visible in this time span.</div>';
+    if (w.length === 1 && w[0].openA && w[0].openB) return '<div class="muted">Visible for the whole time span.</div>';
+    return '<ol>' + w.map(x => `<li>${x.openA ? '… ' : ''}${fmtT(x.a)} → ${fmtT(x.b)}${x.openB ? ' …' : ''}
+      <span class="muted">(${fmtDur(x.b - x.a)})</span></li>`).join('') + '</ol>';
+  }
+
+  function render() {
+    if (!st) return;
+    const k = curK, pct = v => `${(100 * v).toFixed(0)}%`;
+    let hmax = -90, azmax = 0; st.hz.forEach((v, i) => { if (v > hmax) { hmax = v; azmax = i * 360 / Core.N_AZ; } });
+    $('site-out').innerHTML = `
+      <div style="margin-top:10px;font-size:15px"><b>${fmtLat(st.lat)}, ${fmtLon(st.lon)}</b></div>
+      <div class="muted">Elevation ${Math.round(st.h_m).toLocaleString()} m (LOLA, vs 1737.4 km sphere) ·
+        highest horizon ${hmax.toFixed(1)}° toward azimuth ${azmax.toFixed(0)}°</div>
+      <div style="margin-top:10px"><b>${T.t[k]} UTC</b></div>
+      ${statusLine('sun', k)}${statusLine('earth', k)}
+      <div style="margin-top:10px"><b>Visibility windows</b> <span class="muted">(click a bar to jump in time)</span></div>
+      ${bars(k)}
+      <div class="muted">Sun ${pct(win.frac.sun)} · Earth ${pct(win.frac.earth)} · both together ${pct(win.frac.both)} of the time span</div>
+      <div style="margin-top:10px"><b>Horizon panorama</b> <span class="muted">(terrain, Sun and Earth paths)</span></div>
+      ${panorama(k)}
+      <details open><summary style="color:${COL.sun}">Sunlight windows (${win.sun.length})</summary>${list('sun')}</details>
+      <details open><summary style="color:${COL.earth}">Earth line-of-sight windows (${win.earth.length})</summary>${list('earth')}</details>
+      <details><summary style="color:${COL.both}">Sun and Earth together (${win.both.length})</summary>${list('both')}</details>
+      <div class="muted" style="margin-top:10px">Windows count the Sun or Earth as visible when the centre of its disc is above the
+        terrain horizon. The horizon is traced to 600 km along 720 azimuths over LOLA LDEM_${S.dem_ppd}
+        (${(30.32 / S.dem_ppd).toFixed(1)} km grid), including the Moon's curvature, for an antenna 2 m above the ground.
+        Features smaller than the grid are not resolved. Earth visibility is the Moon–Earth line of sight; it
+        does not check which ground station on Earth is facing the Moon. Times are UTC.</div>`;
+    $('site-bars').onclick = ev => {
+      const r = ev.currentTarget.getBoundingClientRect(), f = (ev.clientX - r.left - 44) / (r.width - 44);
+      const t = Core.t0 + Math.min(1, Math.max(0, f)) * (Core.t1 - Core.t0);
+      let best = 0; T.t_ms.forEach((v, i) => { if (Math.abs(v - t) < Math.abs(T.t_ms[best] - t)) best = i; });
+      range.value = best; range.dispatchEvent(new Event('input'));
+    };
+  }
+
+  window.addEventListener('tl-step', e => { curK = e.detail; render(); });
+  gd.on('plotly_click', ev => {
+    const p = ev.points && ev.points[0];
+    if (!p || p.data.type !== 'surface') return;
+    const r = Math.hypot(p.x, p.y, p.z);
+    select(Math.asin(p.z / r) * R2D, Math.atan2(p.y, p.x) * R2D);
+  });
+  $('site-go').onclick = () => {
+    const la = parseFloat($('site-lat').value), lo = parseFloat($('site-lon').value);
+    if (isFinite(la) && isFinite(lo) && Math.abs(la) <= 90) select(la, lo);
+  };
+  ['site-lat', 'site-lon'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') $('site-go').click(); }));
+  const m = location.hash.match(/site=(-?[\d.]+),(-?[\d.]+)/);   // e.g. page.html#site=-89.45,-137
+  if (m) select(+m[1], +m[2]);
 })();
 """
 
@@ -300,7 +598,8 @@ def color_layer(kind, lat, lon, h, region, gravity_degree=150, trek_level=None):
 
 # ---------------------------------------------------------------------------- figure
 def moon_figure(ppd=4, stride=2, region=None, exaggeration=3.0, color="wac", date=None,
-                labels=False, source="lola", gravity_degree=150, timeline=None):
+                labels=False, source="lola", gravity_degree=150, timeline=None,
+                horizon_ppd=4):
     """timeline=(days, step_hours) adds a time slider that moves the Sun and Earth (JPL Horizons)
     and re-lights the Moon in the browser. Needs a global view with the WAC texture."""
     if timeline and (region or color != "wac"):
@@ -316,7 +615,8 @@ def moon_figure(ppd=4, stride=2, region=None, exaggeration=3.0, color="wac", dat
     if lit:
         jd = horizons.utc_iso_to_jd_tdb(date)
         if timeline:
-            jds, sun_track, earth_track = sun_earth_track(jd, *timeline)
+            coarse, fine = sun_earth_track(jd, *timeline)
+            jds, sun_track, earth_track = coarse["jd"], coarse["sun"], coarse["earth"]
             sun_me = sun_track[0] / np.linalg.norm(sun_track[0])
             earth_me = earth_track[0] / np.linalg.norm(earth_track[0])
         else:
@@ -386,8 +686,13 @@ def moon_figure(ppd=4, stride=2, region=None, exaggeration=3.0, color="wac", dat
                                        mode="lines+markers+text", text=["", name], textposition="top center",
                                        line=dict(color=col, width=5), marker=dict(size=[0, size], color=col),
                                        textfont=dict(color=col, size=13), hoverinfo="text", name=name))
-        fig.update_layout(meta=dict(timeline=timeline_meta(jds, sun_track, earth_track, lat, lon, h,
-                                                           refl, exaggeration)))
+        fig.add_trace(go.Scatter3d(x=[], y=[], z=[], mode="markers", name="Selected site",
+                                   marker=dict(size=7, color="#ff4d6d", line=dict(color="white", width=2)),
+                                   hoverinfo="text"))
+        tl = timeline_meta(jds, sun_track, earth_track, lat, lon, h, refl, exaggeration)
+        tl["t_ms"] = jd_tdb_to_unix_ms(jds).tolist()
+        tl["site"] = site_meta(fine, horizon_ppd, exaggeration)
+        fig.update_layout(meta=dict(timeline=tl))
     elif lit and not region:
         for vec, name, col in ((sun_me, "Sun direction", "#ffcc33"), (earth_me, "Earth direction", "#4da6ff")):
             p = np.outer([1.02, 1.6], vec) * R_LOLA / 1000
@@ -408,7 +713,8 @@ def moon_figure(ppd=4, stride=2, region=None, exaggeration=3.0, color="wac", dat
         template="plotly_dark", paper_bgcolor="black",
         scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False),
                    aspectmode="data", bgcolor="black", camera=dict(eye=eye), dragmode="orbit"),
-        margin=dict(l=0, r=0, t=70, b=0), legend=dict(x=0.01, y=0.02),
+        margin=dict(l=0, r=0, t=70, b=0),
+        legend=dict(x=0.01, y=0.88 if timeline else 0.02, bgcolor="rgba(0,0,0,0)"),
     )
     return fig
 
@@ -432,7 +738,7 @@ def write(fig, path: Path, open_browser: bool):
     has_timeline = isinstance(fig.layout.meta, dict) and "timeline" in fig.layout.meta
     fig.write_html(path, include_plotlyjs="cdn", auto_open=open_browser,
                    config=dict(scrollZoom=True, displaylogo=False),
-                   post_script=TIMELINE_JS if has_timeline else None)
+                   post_script=[TIMELINE_JS, SITE_JS] if has_timeline else None)
     print(f"Wrote {path}")
 
 
@@ -453,6 +759,8 @@ def main():
                     help="add a time slider spanning DAYS from --date (default now): Sun and Earth "
                          "positions from JPL Horizons, Moon re-lit at every step")
     ap.add_argument("--step", type=float, default=6.0, help="time-slider step in hours (default 6)")
+    ap.add_argument("--horizon-ppd", type=int, default=4, choices=lola_data.SUPPORTED_RES,
+                    help="LOLA grid used for site terrain horizons (4 = 7.6 km, 16 = 1.9 km but ~40 MB page)")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--no-open", action="store_true")
     a = ap.parse_args()
@@ -460,7 +768,7 @@ def main():
     date = None if a.date.lower() == "none" else (
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M") if a.date.lower() == "now" else a.date)
     fig = moon_figure(a.ppd, a.stride, a.region, a.exaggeration, a.color, date, a.labels, a.source,
-                      a.gravity_degree, timeline=(a.timeline, a.step) if a.timeline else None)
+                      a.gravity_degree, timeline=(a.timeline, a.step) if a.timeline else None, horizon_ppd=a.horizon_ppd)
     name = f"moon_{a.color}{'_region' if a.region else ''}{'_timeline' if a.timeline else ''}.html"
     write(fig, a.out or OUT_DIR / name, not a.no_open)
 
