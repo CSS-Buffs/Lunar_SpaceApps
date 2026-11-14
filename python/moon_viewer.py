@@ -14,6 +14,7 @@ Opens an HTML viewer: drag = rotate, scroll = zoom, right-drag = pan, double-cli
 Examples
     python moon_viewer.py                                    # photo-textured Moon, lit as of now
     python moon_viewer.py --date 2026-11-20T00:00 --labels   # phase on a given date + names
+    python moon_viewer.py --timeline 30                      # time slider: Sun + Earth over 30 days
     python moon_viewer.py --color gravity                    # GRAIL free-air anomaly
     python moon_viewer.py --color tio2 --labels
     python moon_viewer.py --region -45 -41.5 -13.5 -9 --source gld100 --exaggeration 2  # Tycho
@@ -83,6 +84,139 @@ def sun_and_earth_me(jd_tdb):
     s = R @ eph["sun"].position(jd_tdb)
     e = R @ eph["earth"].position(jd_tdb)
     return s / np.linalg.norm(s), e / np.linalg.norm(e)
+
+
+def sun_earth_track(jd0, days, step_h):
+    """Sun and Earth around the Moon over a time span, from JPL Horizons, in the ME frame.
+    Returns times (TDB JD) and (N,3) Moon-centred positions in metres."""
+    jds = jd0 + np.arange(0.0, days * 24.0 + 1e-9, step_h) / 24.0
+    eph = horizons.perturber_ephemerides(jds[0], jds[-1], pad_days=0.2)
+    R = lf.icrf_to_me(jds)
+    sun = np.einsum("nij,nj->ni", R, eph["sun"].position(jds))
+    earth = np.einsum("nij,nj->ni", R, eph["earth"].position(jds))
+    return jds, sun, earth
+
+
+def phase_name(frac, waxing):
+    if frac < 0.03:
+        return "New Moon"
+    if frac > 0.97:
+        return "Full Moon"
+    if abs(frac - 0.5) < 0.04:
+        return "First Quarter" if waxing else "Last Quarter"
+    return ("Waxing " if waxing else "Waning ") + ("Crescent" if frac < 0.5 else "Gibbous")
+
+
+def timeline_meta(jds, sun, earth, lat, lon, h, refl, exaggeration):
+    """Everything the in-page time slider needs to re-light the Moon and move the Sun and Earth
+    in the browser. Terrain normals and reflectance are packed as 8-bit base64 arrays."""
+    import base64
+    b64 = lambda a: base64.b64encode(np.ascontiguousarray(a).tobytes()).decode("ascii")
+    # cos(incidence) is linear in the Sun vector, so three basis shadings give every Sun direction
+    basis = [illumination(h, lat, lon, e, exaggeration) for e in np.eye(3)]
+    normals = [np.clip(np.round(b * 127), -127, 127).astype(np.int8) for b in basis]
+    refl = np.clip(refl / max(np.percentile(refl, 99.5), 1e-6), 0, 1)
+
+    s_hat = sun / np.linalg.norm(sun, axis=1, keepdims=True)
+    e_hat = earth / np.linalg.norm(earth, axis=1, keepdims=True)
+    cos_i = np.sum(s_hat * e_hat, axis=1)                 # phase angle at the Moon
+    frac = (1 + cos_i) / 2                                # illuminated fraction seen from Earth
+    s_lat, s_lon, _ = lf.latlon(sun)
+    e_lat, e_lon, _ = lf.latlon(earth)
+    wrap = lambda x: (x + 180) % 360 - 180
+    waxing = wrap(s_lon - e_lon) > 0                      # Sun east of the sub-Earth point
+    return dict(
+        shape=list(h.shape), nx=b64(normals[0]), ny=b64(normals[1]), nz=b64(normals[2]),
+        refl=b64(np.round(refl * 255).astype(np.uint8)),
+        t=[horizons.jd_tdb_to_utc_iso(j)[:16].replace("T", " ") for j in jds],
+        sun=np.round(s_hat, 5).tolist(), earth=np.round(e_hat, 5).tolist(),
+        sun_km=np.round(np.linalg.norm(sun, axis=1) / 1e3).tolist(),
+        earth_km=np.round(np.linalg.norm(earth, axis=1) / 1e3).tolist(),
+        frac=np.round(frac, 4).tolist(),
+        phase=[phase_name(f, w) for f, w in zip(frac, waxing)],
+        sub_sun=np.round(np.column_stack([s_lat, wrap(s_lon)]), 2).tolist(),
+        sub_earth=np.round(np.column_stack([e_lat, wrap(e_lon)]), 2).tolist(),
+        r_sun=SUN_DISPLAY_R * R_LOLA / 1e3, r_earth=EARTH_DISPLAY_R * R_LOLA / 1e3,
+    )
+
+
+SUN_DISPLAY_R, EARTH_DISPLAY_R = 3.4, 2.3   # marker distances in Moon radii (not to scale)
+
+TIMELINE_JS = r"""
+(function () {
+  const gd = document.getElementById('{plot_id}');
+  const T = gd.layout.meta.timeline;
+  const bytes = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  const nx = new Int8Array(bytes(T.nx).buffer), ny = new Int8Array(bytes(T.ny).buffer),
+        nz = new Int8Array(bytes(T.nz).buffer), refl = bytes(T.refl);
+  const [nr, nc] = T.shape, N = T.t.length;
+  const idx = name => gd.data.findIndex(d => d.name === name);
+  const iSun = idx('Sun'), iEarth = idx('Earth');
+
+  document.body.insertAdjacentHTML('beforeend', `
+   <div id="tl" style="position:fixed;left:50%;bottom:14px;transform:translateX(-50%);
+        width:min(760px,calc(100vw - 32px));background:rgba(20,20,28,.88);color:#eee;
+        font:13px system-ui,sans-serif;padding:10px 14px;border-radius:10px;z-index:10;
+        box-shadow:0 2px 12px rgba(0,0,0,.6)">
+     <div style="display:flex;gap:10px;align-items:center">
+       <button id="tl-play" style="width:64px;background:#333;color:#eee;border:1px solid #555;
+               border-radius:6px;padding:4px 0;cursor:pointer">Play</button>
+       <input id="tl-range" type="range" min="0" max="${N - 1}" value="0" step="1" style="flex:1">
+       <b id="tl-date" style="min-width:128px;text-align:right"></b>
+     </div>
+     <div id="tl-info" style="margin-top:6px;opacity:.85;font-size:12px;line-height:1.5"></div>
+   </div>`);
+  const range = document.getElementById('tl-range'), play = document.getElementById('tl-play');
+
+  function surfacecolor(k) {
+    const [sx, sy, sz] = T.sun[k], rows = new Array(nr);
+    for (let r = 0, i = 0; r < nr; r++) {
+      const row = new Array(nc);
+      for (let c = 0; c < nc; c++, i++) {
+        const cosi = Math.max(0, (nx[i] * sx + ny[i] * sy + nz[i] * sz) / 127);
+        row[c] = Math.min(1, refl[i] / 255 * (0.03 + 0.97 * cosi) * 1.35);
+      }
+      rows[r] = row;
+    }
+    return rows;
+  }
+  const seg = (v, r) => [[v[0] * 1782, v[0] * r], [v[1] * 1782, v[1] * r], [v[2] * 1782, v[2] * r]];
+
+  let busy = false, pending = null;
+  async function show(k) {
+    if (busy) { pending = k; return; }
+    busy = true;
+    const s = seg(T.sun[k], T.r_sun), e = seg(T.earth[k], T.r_earth);
+    document.getElementById('tl-date').textContent = T.t[k] + ' UTC';
+    document.getElementById('tl-info').innerHTML =
+      `<b>${T.phase[k]}</b>, ${(100 * T.frac[k]).toFixed(1)}% lit as seen from Earth · ` +
+      `<span style="color:#4da6ff">Earth</span> ${T.earth_km[k].toLocaleString()} km, ` +
+      `sub-Earth ${T.sub_earth[k][0]}°, ${T.sub_earth[k][1]}° · ` +
+      `<span style="color:#ffcc33">Sun</span> ${(T.sun_km[k] / 1e6).toFixed(2)} M km, ` +
+      `sub-solar ${T.sub_sun[k][0]}°, ${T.sub_sun[k][1]}°`;
+    await Plotly.restyle(gd, {x: [s[0], e[0]], y: [s[1], e[1]], z: [s[2], e[2]],
+      hovertext: [[`Sun: ${T.sun_km[k].toLocaleString()} km`, `Sun: ${T.sun_km[k].toLocaleString()} km`],
+                  [`Earth: ${T.earth_km[k].toLocaleString()} km`, `Earth: ${T.earth_km[k].toLocaleString()} km`]]},
+      [iSun, iEarth]);
+    await Plotly.restyle(gd, {surfacecolor: [surfacecolor(k)]}, [0]);
+    busy = false;
+    if (pending !== null) { const p = pending; pending = null; show(p); }
+  }
+  range.addEventListener('input', () => show(+range.value));
+
+  let timer = null;
+  play.addEventListener('click', () => {
+    if (timer) { clearInterval(timer); timer = null; play.textContent = 'Play'; return; }
+    play.textContent = 'Pause';
+    timer = setInterval(() => {
+      if (busy) return;
+      range.value = (+range.value + 1) % N;
+      show(+range.value);
+    }, 120);
+  });
+  show(0);
+})();
+"""
 
 
 def illumination(h, lat, lon, sun_me, exaggeration=1.0):
@@ -166,20 +300,34 @@ def color_layer(kind, lat, lon, h, region, gravity_degree=150, trek_level=None):
 
 # ---------------------------------------------------------------------------- figure
 def moon_figure(ppd=4, stride=2, region=None, exaggeration=3.0, color="wac", date=None,
-                labels=False, source="lola", gravity_degree=150):
+                labels=False, source="lola", gravity_degree=150, timeline=None):
+    """timeline=(days, step_hours) adds a time slider that moves the Sun and Earth (JPL Horizons)
+    and re-lights the Moon in the browser. Needs a global view with the WAC texture."""
+    if timeline and (region or color != "wac"):
+        raise ValueError("--timeline needs the global WAC view (no --region, --color wac)")
+    if timeline and date is None:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
     lat, lon, h, geo_label = load_geometry(ppd, stride, region, source)
     c, cs, ctitle, unit = color_layer(color, lat, lon, h, region, gravity_degree)
+    refl = c.copy()
 
     sun_me = earth_me = None
     lit = date is not None
     if lit:
         jd = horizons.utc_iso_to_jd_tdb(date)
-        sun_me, earth_me = sun_and_earth_me(jd)
+        if timeline:
+            jds, sun_track, earth_track = sun_earth_track(jd, *timeline)
+            sun_me = sun_track[0] / np.linalg.norm(sun_track[0])
+            earth_me = earth_track[0] / np.linalg.norm(earth_track[0])
+        else:
+            sun_me, earth_me = sun_and_earth_me(jd)
         cosi = np.clip(illumination(h, lat, lon, sun_me, exaggeration), 0, None)
         if color == "wac":     # reflectance x Lambert shading + faint earthshine
             c = c * (0.03 + 0.97 * cosi)
             c = np.clip(c / max(np.percentile(c, 99.5), 1e-6), 0, 1)
             ctitle = f"Sunlit WAC reflectance, {date} UTC"
+            if timeline:
+                ctitle = f"Sunlit WAC reflectance, {date} UTC + {timeline[0]:g} days (use the time slider)"
 
     r = (R_LOLA + exaggeration * h) / 1000.0
     la, lo = np.radians(lat)[:, None], np.radians(lon)[None, :]
@@ -192,6 +340,7 @@ def moon_figure(ppd=4, stride=2, region=None, exaggeration=3.0, color="wac", dat
 
     surface = go.Surface(
         x=x, y=y, z=z, surfacecolor=np.round(c, 4), colorscale=cs,
+        **(dict(cmin=0, cmax=1) if timeline else {}),
         showscale=color != "wac",
         colorbar=dict(title=f"{ctitle}" + (f" [{unit}]" if unit else ""), thickness=15, len=0.6),
         customdata=custom,
@@ -224,7 +373,22 @@ def moon_figure(ppd=4, stride=2, region=None, exaggeration=3.0, color="wac", dat
                 marker=dict(size=2, color=[colors.get(f["type"], "white") for f in feats]),
                 hoverinfo="text", name="IAU names (Moon Trek)"))
 
-    if lit and not region:
+    if timeline:
+        R0 = R_LOLA / 1000
+        for track, name, col, rd, size in ((sun_track, "Sun", "#ffcc33", SUN_DISPLAY_R, 22),
+                                          (earth_track, "Earth", "#4da6ff", EARTH_DISPLAY_R, 14)):
+            u = track / np.linalg.norm(track, axis=1, keepdims=True) * rd * R0
+            fig.add_trace(go.Scatter3d(x=u[:, 0], y=u[:, 1], z=u[:, 2], mode="lines",
+                                       line=dict(color=col, width=2, dash="dot"), opacity=0.5,
+                                       hoverinfo="skip", name=f"{name} path (Moon-fixed)"))
+            p = np.outer([1.025, rd], u[0] / np.linalg.norm(u[0]))
+            fig.add_trace(go.Scatter3d(x=p[:, 0] * R0, y=p[:, 1] * R0, z=p[:, 2] * R0,
+                                       mode="lines+markers+text", text=["", name], textposition="top center",
+                                       line=dict(color=col, width=5), marker=dict(size=[0, size], color=col),
+                                       textfont=dict(color=col, size=13), hoverinfo="text", name=name))
+        fig.update_layout(meta=dict(timeline=timeline_meta(jds, sun_track, earth_track, lat, lon, h,
+                                                           refl, exaggeration)))
+    elif lit and not region:
         for vec, name, col in ((sun_me, "Sun direction", "#ffcc33"), (earth_me, "Earth direction", "#4da6ff")):
             p = np.outer([1.02, 1.6], vec) * R_LOLA / 1000
             fig.add_trace(go.Scatter3d(x=p[:, 0], y=p[:, 1], z=p[:, 2], mode="lines+text",
@@ -265,8 +429,10 @@ def add_orbit(fig, r_me_m, t_s=None, alt_m=None, name="Orbit (Moon-fixed)", colo
 
 def write(fig, path: Path, open_browser: bool):
     path.parent.mkdir(parents=True, exist_ok=True)
+    has_timeline = isinstance(fig.layout.meta, dict) and "timeline" in fig.layout.meta
     fig.write_html(path, include_plotlyjs="cdn", auto_open=open_browser,
-                   config=dict(scrollZoom=True, displaylogo=False))
+                   config=dict(scrollZoom=True, displaylogo=False),
+                   post_script=TIMELINE_JS if has_timeline else None)
     print(f"Wrote {path}")
 
 
@@ -283,6 +449,10 @@ def main():
     ap.add_argument("--source", default="lola", choices=["lola", "gld100"],
                     help="terrain for --region: LOLA grid or LROC GLD100 (QuickMap, ~100 m)")
     ap.add_argument("--gravity-degree", type=int, default=150)
+    ap.add_argument("--timeline", type=float, metavar="DAYS",
+                    help="add a time slider spanning DAYS from --date (default now): Sun and Earth "
+                         "positions from JPL Horizons, Moon re-lit at every step")
+    ap.add_argument("--step", type=float, default=6.0, help="time-slider step in hours (default 6)")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--no-open", action="store_true")
     a = ap.parse_args()
@@ -290,8 +460,9 @@ def main():
     date = None if a.date.lower() == "none" else (
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M") if a.date.lower() == "now" else a.date)
     fig = moon_figure(a.ppd, a.stride, a.region, a.exaggeration, a.color, date, a.labels, a.source,
-                      a.gravity_degree)
-    write(fig, a.out or OUT_DIR / f"moon_{a.color}{'_region' if a.region else ''}.html", not a.no_open)
+                      a.gravity_degree, timeline=(a.timeline, a.step) if a.timeline else None)
+    name = f"moon_{a.color}{'_region' if a.region else ''}{'_timeline' if a.timeline else ''}.html"
+    write(fig, a.out or OUT_DIR / name, not a.no_open)
 
 
 if __name__ == "__main__":
