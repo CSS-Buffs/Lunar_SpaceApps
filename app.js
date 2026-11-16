@@ -390,13 +390,59 @@ function meshColor(sh) {
 }
 const SUN_R = 3.4, EARTH_R = 2.3, SUN_C = '#ffcc33', EARTH_C = '#4da6ff', SITE_C = '#ff4d6d';
 function bodyTraceXYZ(u, rd) { const R = S.stat.r_moon_km; return {x: [u[0] * R * 1.025, u[0] * R * rd], y: [u[1] * R * 1.025, u[1] * R * rd], z: [u[2] * R * 1.025, u[2] * R * rd]}; }
-function siteXYZ(list) {
-  const R = S.stat.r_moon_km, ex = S.mesh.exag, o = {x: [], y: [], z: [], text: []};
-  for (const s of list) {
-    const g = dirOf(s.lat, s.lon), r = R + (ex * demHeight(s.lat, s.lon)) / 1000 + 8;
-    o.x.push(g[0] * r); o.y.push(g[1] * r); o.z.push(g[2] * r); o.text.push(s.label);
+// Site markers are small 3D spheres (mesh3d), not flat screen-facing markers, so terrain never cuts
+// through them as the globe turns. Each sphere rests on the highest nearby mesh vertex.
+const SITE_BALL = {sel: 32, saved: 20};                   // sphere radius [km]
+function meshTopKm(lat, lon) {                            // highest drawn terrain near (lat, lon) [km above R]
+  const M = S.mesh, near = (a, v) => { let b = 0; for (let k = 1; k < a.length; k++) if (Math.abs(a[k] - v) < Math.abs(a[b] - v)) b = k; return b; };
+  const r0 = near(M.lat, lat), c0 = near(M.lon, ((lon % 360) + 360) % 360);   // mesh lon runs 0..360
+  let top = -Infinity;
+  for (let r = Math.max(0, r0 - 2); r <= Math.min(M.nr - 1, r0 + 2); r++)
+    for (let dc = -2; dc <= 2; dc++) top = Math.max(top, M.h[r * M.nc + (c0 + dc + M.nc) % M.nc]);
+  return M.exag * Math.max(top, demHeight(lat, lon)) / 1000;
+}
+const BALL = (() => {                                     // unit UV sphere, 10 rings x 16 segments
+  const NR = 10, NS = 16, v = [], f = [];
+  for (let i = 0; i <= NR; i++) for (let j = 0; j < NS; j++) {
+    const th = Math.PI * i / NR, ph = 2 * Math.PI * j / NS;
+    v.push([Math.sin(th) * Math.cos(ph), Math.sin(th) * Math.sin(ph), Math.cos(th)]);
   }
+  for (let i = 0; i < NR; i++) for (let j = 0; j < NS; j++) {
+    const a = i * NS + j, b = i * NS + (j + 1) % NS, c = a + NS, d = b + NS;
+    f.push([a, c, b], [b, c, d]);
+  }
+  return {v, f};
+})();
+function siteBalls(list, rad) {                           // one mesh3d of spheres + label anchors
+  const R = S.stat.r_moon_km, o = {x: [], y: [], z: [], i: [], j: [], k: [], tops: []};
+  list.forEach((st, n) => {
+    const g = dirOf(st.lat, st.lon), rc = R + meshTopKm(st.lat, st.lon) + rad * 1.3, base = n * BALL.v.length;
+    for (const p of BALL.v) { o.x.push(g[0] * rc + p[0] * rad); o.y.push(g[1] * rc + p[1] * rad); o.z.push(g[2] * rc + p[2] * rad); }
+    for (const t of BALL.f) { o.i.push(base + t[0]); o.j.push(base + t[1]); o.k.push(base + t[2]); }
+    o.tops.push({dir: g, xyz: g.map(c => c * (rc + rad)), label: st.label, sel: rad === SITE_BALL.sel});
+  });
   return o;
+}
+// Labels are scene annotations: drawn over the 3D canvas so the Moon never clips the words. Plotly
+// can't hide them behind the Moon by itself, so a label is shown only while its site faces the camera.
+function siteLabelVisible(dir) {
+  const e = G3.eye || {x: 1, y: 0, z: 0}, n = Math.hypot(e.x, e.y, e.z) || 1;
+  return (dir[0] * e.x + dir[1] * e.y + dir[2] * e.z) / n > 0.12;
+}
+function siteAnnotations() {
+  return (G3.labels || []).map(t => ({
+    x: t.xyz[0], y: t.xyz[1], z: t.xyz[2], text: t.label, showarrow: false, yshift: t.sel ? 16 : 12,
+    font: {color: t.sel ? '#fff' : '#ddd', size: t.sel ? 12 : 11}, bgcolor: 'rgba(0,0,0,0.55)', borderpad: 2,
+    visible: siteLabelVisible(t.dir)}));
+}
+function onCamera(ev) {                                   // keep label visibility in step with the view
+  const cam = ev && (ev['scene.camera'] || (ev.scene && ev.scene.camera));
+  const eye = cam ? cam.eye : ev && ev['scene.camera.eye'];
+  if (!eye || !G3.ready) return;
+  G3.eye = eye;
+  const ann = (G3.div.layout.scene.annotations || []), upd = {};
+  (G3.labels || []).forEach((t, n) => { const v = siteLabelVisible(t.dir); if (ann[n] && ann[n].visible !== v) upd[`scene.annotations[${n}].visible`] = v; });
+  if (Object.keys(upd).length) Plotly.relayout(G3.div, upd);
 }
 function build3D() {
   const M = S.mesh, R = S.stat.r_moon_km, X = [], Y = [], Z = [];
@@ -424,17 +470,18 @@ function build3D() {
      line: {color: SUN_C, width: 5}, marker: {size: [0, 22], color: SUN_C}, textfont: {color: SUN_C, size: 13}, hoverinfo: 'skip', name: 'Sun'},
     {type: 'scatter3d', mode: 'lines+markers+text', ...bodyTraceXYZ(P.eh, EARTH_R), text: ['', 'Earth'], textposition: 'top center',
      line: {color: EARTH_C, width: 5}, marker: {size: [0, 14], color: EARTH_C}, textfont: {color: EARTH_C, size: 13}, hoverinfo: 'skip', name: 'Earth'},
-    {type: 'scatter3d', mode: 'markers+text', x: [], y: [], z: [], text: [], textposition: 'top center', textfont: {color: '#ddd', size: 11},
-     marker: {size: 4, color: '#ffffff', line: {color: '#000', width: 1}}, hoverinfo: 'text', name: 'Saved sites'},
-    {type: 'scatter3d', mode: 'markers+text', x: [], y: [], z: [], text: [], textposition: 'top center', textfont: {color: '#fff', size: 12},
-     marker: {size: 7, color: SITE_C, line: {color: 'white', width: 2}}, hoverinfo: 'text', name: 'Selected site'},
+    {type: 'mesh3d', x: [], y: [], z: [], i: [], j: [], k: [], color: '#f2f2f2', flatshading: false, showlegend: true, hoverinfo: 'skip',
+     lighting: {ambient: 0.55, diffuse: 0.7, specular: 0.35, roughness: 0.4}, lightposition: {x: 1e5, y: 1e5, z: 1e5}, name: 'Saved sites'},
+    {type: 'mesh3d', x: [], y: [], z: [], i: [], j: [], k: [], color: SITE_C, flatshading: false, showlegend: true, hoverinfo: 'skip',
+     lighting: {ambient: 0.55, diffuse: 0.7, specular: 0.5, roughness: 0.3}, lightposition: {x: 1e5, y: 1e5, z: 1e5}, name: 'Selected site'},
   ];
   const u = P.eh;                                         // look from Earth, as in the original viewer
+  if (!G3.eye) G3.eye = {x: 1.7 * u[0], y: 1.7 * u[1], z: 1.7 * u[2]};
   Plotly.newPlot(G3.div, data, {
     template: 'plotly_dark', paper_bgcolor: 'black', font: {color: '#ddd'}, margin: {l: 0, r: 0, t: 0, b: 0}, showlegend: true,
     legend: {x: 0.5, xanchor: 'center', y: 0.9, orientation: 'h', bgcolor: 'rgba(0,0,0,0)', font: {size: 11, color: '#ddd'}},
     scene: {xaxis: {visible: false}, yaxis: {visible: false}, zaxis: {visible: false}, aspectmode: 'data', bgcolor: 'black',
-            dragmode: 'orbit', camera: {eye: {x: 1.7 * u[0], y: 1.7 * u[1], z: 1.7 * u[2]}}},
+            dragmode: 'orbit', camera: {eye: G3.eye}, annotations: []},
     uirevision: 'keep',
   }, {scrollZoom: true, displaylogo: false, responsive: true, modeBarButtonsToRemove: ['toImage']});
   G3.div.on('plotly_click', ev => {
@@ -442,13 +489,19 @@ function build3D() {
     if (!p || p.data.type !== 'surface') return;
     const ll = latlonOf([p.x, p.y, p.z]); placePoint(ll[0], ll[1]);
   });
+  G3.div.on('plotly_relayouting', onCamera);
+  G3.div.on('plotly_relayout', onCamera);
   G3.ready = true;
   update3DSites();
 }
 function update3DSites() {
   if (!G3.ready) return;
-  const saved = siteXYZ(S.sites.map(s => ({...s, label: s.name}))), sel = siteXYZ(S.sel ? [{...S.sel, label: selLabel()}] : []);
-  Plotly.restyle(G3.div, {x: [saved.x, sel.x], y: [saved.y, sel.y], z: [saved.z, sel.z], text: [saved.text, sel.text], hovertext: [saved.text, sel.text]}, [5, 6]);
+  const others = S.sites.filter(s => !(S.sel && sameSite(S.sel, s.lat, s.lon)));   // the selection gets its own ball
+  const saved = siteBalls(others.map(s => ({...s, label: s.name})), SITE_BALL.saved);
+  const sel = siteBalls(S.sel ? [{...S.sel, label: selLabel()}] : [], SITE_BALL.sel);
+  G3.labels = [...saved.tops, ...sel.tops];
+  Plotly.update(G3.div, {x: [saved.x, sel.x], y: [saved.y, sel.y], z: [saved.z, sel.z], i: [saved.i, sel.i], j: [saved.j, sel.j], k: [saved.k, sel.k]},
+                {'scene.annotations': siteAnnotations()}, [5, 6]);
 }
 async function draw3D() {
   if (!G3.ready || S.view !== '3d') return;
