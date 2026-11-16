@@ -6,8 +6,8 @@ Lunar site planner: the interactive app laid out like wireframe/lunar_wireframe.
 
 What runs where
   * This script prepares the Moon (LOLA shape, WAC texture from Moon Trek, terrain normals,
-    LOLA heights for terrain horizons), caches it in data/app/, and serves the web page in
-    python/web/.
+    LOLA heights for terrain horizons), caches it in data/app/, and serves the web page (index.html, app.js, app.css)
+    from the repository root.
   * When the start date or span changes, the page asks /api/track. That calls the JPL Horizons
     API for the Sun and Earth around the Moon and rotates them into the Moon-fixed (ME) frame.
   * Everything else (lighting, terrain horizons, visibility windows, comparisons) is computed
@@ -35,7 +35,7 @@ import moontrek
 from moon_viewer import R_LOLA, color_layer, illumination, load_geometry
 
 ROOT = Path(__file__).resolve().parent
-WEB = ROOT / "web"
+WEB = ROOT.parent                      # repository root: index.html, app.js, app.css
 CACHE = ROOT.parent / "data" / "app"
 MAX_DAYS = 90
 
@@ -127,6 +127,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._send(body, "application/json")
             except Exception as exc:                      # surface Horizons/date errors in the UI
                 return self._send(json.dumps({"error": str(exc)[:500]}).encode(), "application/json", 502)
+        if url.path == "/data/site/config.js":            # server mode: live Horizons, not the static data
+            return self._send(b"window.LUNAR_STATIC = null;", "text/javascript")
         if url.path in ("/", ""):
             self.path = "/index.html"
         return super().do_GET()

@@ -18,7 +18,7 @@ All downloads are cached in `data/`. Generated pages and plots go to `output/`.
 ```bash
 pip install -r python/requirements.txt
 cd python
-python moon_app.py          # prepares NASA data once, then serves http://localhost:8050 and opens it
+python moon_app.py          # prepares NASA data once, then serves ../index.html at http://localhost:8050
 ```
 
 The panels follow `wireframe/lunar_wireframe.png`. They are dark, floating windows: drag one by its title bar, resize it from its bottom-right corner, and minimise it with – (or double-click the title). The top bar has **Minimize all** and **Reset panels**. The app remembers positions and sizes.
@@ -33,17 +33,16 @@ The panels follow `wireframe/lunar_wireframe.png`. They are dark, floating windo
 
 Visibility takes the terrain into account. For each site the app traces the skyline over LOLA heights (720 azimuths, out to 600 km, with lunar curvature). The Sun or Earth counts as visible only while it is above that skyline.
 
-### Website (static hosting)
+### Website (static, no server)
 
-The planner can also run as a static website, with no Python server:
+The planner also runs with no Python server. **Open `index.html` (in this folder) in a browser**, by double-clicking it or from any static host. Its data lives in `data/site/`. To rebuild it:
 
 ```bash
 cd python
-python build_site.py                      # -> site/ (about 13 MB)
-python -m http.server -d ../site 8000     # preview at http://localhost:8000
+python build_site.py                      # -> data/site/ (about 15 MB)
 ```
 
-Browsers can't call the JPL Horizons API directly, so the build pre-computes hourly Sun and Earth positions, one small file per month. By default it covers 2024-01 to 2028-12; use `--first` and `--last` to change the range. Everything else works as in `moon_app.py`.
+Browsers can't call the JPL Horizons API directly, so the build pre-computes hourly Sun and Earth positions, one small file per month. By default it covers 2024-01 to 2028-12; use `--first` and `--last` to change the range. The data files are small JavaScript files loaded with `<script>` tags, so the page works straight from disk (`file://`). Everything else works as in `moon_app.py`. (Plotly loads from a CDN, so an internet connection is still needed.)
 
 **GitHub Pages:** `.github/workflows/pages.yml` builds the site and deploys it on every push to `main`, or when run by hand from the Actions tab. To turn it on, open the repository's Settings → Pages and set Source to **GitHub Actions**. The site will be at `https://<owner>.github.io/<repo>/`.
 
@@ -112,10 +111,11 @@ Two corrections came out of these checks:
 ## Layout
 
 ```
+index.html  app.js  app.css   the lunar site planner web page (static data in data/site/)
 python/  nasa_http.py  horizons.py  quickmap.py  moontrek.py  lola_data.py  grail_gravity.py
          lunar_frames.py  lunar_physics.py  moon_viewer.py  simulate_orbit.py  validate.py
 matlab/  nasa_get.m  horizons_time.m  horizons_vectors.m  quickmap_numeric.m  moontrek_mosaic.m
          moontrek_features.m  lola_read.m  grail_load.m  grail_accel.m  lunar_orientation.m
          lunar_constants.m  moon_viewer.m  moon_orbit_sim.m
-data/    cached NASA downloads (git-ignored)      output/  generated HTML/PNG/report (git-ignored)
+data/    cached NASA downloads, plus data/site/ (built website data)      output/  generated HTML/PNG/report (git-ignored)
 ```

@@ -789,8 +789,19 @@ document.addEventListener('keydown', e => {
 /* ------------------------------------------------------------------ data loading */
 // Two ways to run: with the local server (python moon_app.py, any date, live JPL Horizons), or as a
 // static website (python build_site.py) where Sun/Earth positions are pre-computed per month.
+// Static data is loaded with <script> tags (not fetch) so index.html also works opened straight from disk.
 const STATIC = window.LUNAR_STATIC || null;
-const URLS = STATIC ? {stat: 'data/static.json', tex: 'data/texture.png'} : {stat: '/api/static', tex: '/api/texture.png'};
+const DATA = 'data/site/';
+window.LUNAR_TRACK = window.LUNAR_TRACK || {};
+function loadScript(src) {
+  return new Promise((ok, fail) => {
+    const s = document.createElement('script'); s.src = src; s.async = true;
+    s.onload = ok; s.onerror = () => fail(new Error(`could not load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+const loadStat = () => STATIC ? loadScript(DATA + 'static.js').then(() => window.LUNAR_MOON)
+                              : fetch('/api/static').then(r => r.json());
 const monthCache = new Map();
 async function staticTrack(start, days) {
   let t0 = Date.parse(`${start}:00Z`); t0 -= t0 % HOUR;
@@ -803,7 +814,8 @@ async function staticTrack(start, days) {
   let gT0 = null;
   for (let d = new Date(Date.UTC(new Date(t0).getUTCFullYear(), new Date(t0).getUTCMonth(), 1)); d.getTime() < t1; d.setUTCMonth(d.getUTCMonth() + 1)) {
     const key = d.toISOString().slice(0, 7);
-    if (!monthCache.has(key)) monthCache.set(key, fetch(`data/track/${key}.json`).then(r => { if (!r.ok) throw new Error(`missing data for ${key}`); return r.json(); }));
+    if (!monthCache.has(key)) monthCache.set(key, loadScript(`${DATA}track/${key}.js`).then(() => {
+      const m = window.LUNAR_TRACK[key]; if (!m) throw new Error(`missing data for ${key}`); return m; }));
     const m = await monthCache.get(key);
     if (gT0 === null) gT0 = m.t0_ms;
     if (sun.length) { sun.length -= 3; earth.length -= 3; }   // months overlap by one hour: drop the duplicate
@@ -840,7 +852,9 @@ async function loadTrack() {
   }
 }
 async function loadTexture() {
-  const img = new Image(); img.src = URLS.tex; await img.decode();
+  // the static texture is a data: URL, so reading its pixels is allowed even from file://
+  const src = STATIC ? await loadScript(DATA + 'texture.js').then(() => window.LUNAR_TEXTURE) : '/api/texture.png';
+  const img = new Image(); img.src = src; await img.decode();
   const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
   const ctx = c.getContext('2d'); ctx.drawImage(img, 0, 0);
   const d = ctx.getImageData(0, 0, c.width, c.height).data, g = new Uint8Array(c.width * c.height);
@@ -858,14 +872,14 @@ async function init() {
   }
   $('in-date').value = now.toISOString().slice(0, 10); $('in-time').value = now.toISOString().slice(11, 16);
   try {
-    const [stat] = await Promise.all([fetch(URLS.stat).then(r => r.json()), loadTexture()]);
+    const [stat] = await Promise.all([loadStat(), loadTexture()]);
     S.stat = stat;
     const m = stat.mesh;
     S.mesh = {lat: m.lat, lon: m.lon, nr: m.shape[0], nc: m.shape[1], exag: m.exag, h: new Int16Array(b64(m.h).buffer),
               nx: new Int8Array(b64(m.nx).buffer), ny: new Int8Array(b64(m.ny).buffer), nz: new Int8Array(b64(m.nz).buffer), refl: b64(m.refl)};
     S.dem = {h: new Int16Array(b64(stat.dem.h).buffer), NR: stat.dem.shape[0], NC: stat.dem.shape[1], ppd: stat.dem.ppd};
   } catch (err) {
-    $('loading').textContent = STATIC ? `Could not load the Moon data (${err.message}).`
+    $('loading').textContent = STATIC ? `Could not load the Moon data (${err.message}). Build it with: python python/build_site.py`
       : `Could not load the Moon data (${err.message}). Start the app with: python moon_app.py`; return;
   }
   Object.values(MAPS).forEach(buildMap);

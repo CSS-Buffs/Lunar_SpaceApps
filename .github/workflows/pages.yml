@@ -37,10 +37,16 @@ jobs:
       - name: Build site
         working-directory: python
         run: python build_site.py --first 2024-01 --last 2028-12
+      - name: Collect the website (index.html, app.js, app.css, data/site)
+        run: |
+          mkdir -p _site/data
+          cp index.html app.js app.css _site/
+          cp -r data/site _site/data/site
+          touch _site/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: _site
 
   deploy:
     needs: build
