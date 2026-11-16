@@ -1,6 +1,6 @@
 # Lunar_SpaceApps: a data-driven 3D Moon and orbit simulator
 How to Use:
-Click this link and walk through our project - https://cssbuffslunarexplorationguide.us/
+Click this link and walk through our project - https://css-buffs.github.io/Lunar_SpaceApps/
 -------------------------------------------------------------------------------
 An interactive 3D model of the Moon and a high-fidelity lunar orbit simulator. Both are written in **Python** and **MATLAB**, and both are built from live NASA data services.
 
