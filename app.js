@@ -416,7 +416,8 @@ function build3D() {
   const sp = path('sun', SUN_R), ep = path('earth', EARTH_R);
   const data = [
     {type: 'surface', x: X, y: Y, z: Z, surfacecolor: meshColor(P.sh), colorscale: [[0, '#000000'], [1, '#ffffff']], cmin: 0, cmax: 1,
-     showscale: false, hoverinfo: 'skip', lighting: {ambient: 1, diffuse: 0, specular: 0, fresnel: 0}, name: 'Moon'},
+     // 'none' (not 'skip'): no tooltip, but Plotly still fires click events, so the globe can select a site
+     showscale: false, hoverinfo: 'none', lighting: {ambient: 1, diffuse: 0, specular: 0, fresnel: 0}, name: 'Moon'},
     {type: 'scatter3d', mode: 'lines', ...sp, line: {color: SUN_C, width: 2, dash: 'dot'}, opacity: 0.5, hoverinfo: 'skip', name: 'Sun path (Moon-fixed)'},
     {type: 'scatter3d', mode: 'lines', ...ep, line: {color: EARTH_C, width: 2, dash: 'dot'}, opacity: 0.5, hoverinfo: 'skip', name: 'Earth path (Moon-fixed)'},
     {type: 'scatter3d', mode: 'lines+markers+text', ...bodyTraceXYZ(P.sh, SUN_R), text: ['', 'Sun'], textposition: 'top center',
