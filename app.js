@@ -425,6 +425,14 @@ function siteBalls(list, rad) {                           // one mesh3d of spher
 }
 // Labels are scene annotations: drawn over the 3D canvas so the Moon never clips the words. Plotly
 // can't hide them behind the Moon by itself, so a label is shown only while its site faces the camera.
+// Key panel: each item shows or hides one 3D trace (indices as in build3D); remembered across rebuilds.
+const KEY_OFF = new Set();
+document.querySelectorAll('.key-item').forEach(b => b.addEventListener('click', () => {
+  const n = +b.dataset.trace, off = !KEY_OFF.has(n);
+  off ? KEY_OFF.add(n) : KEY_OFF.delete(n);
+  b.classList.toggle('off', off); b.setAttribute('aria-pressed', String(!off));
+  if (G3.ready) { Plotly.restyle(G3.div, {visible: !off}, [n]); update3DSites(); }
+}));
 function siteLabelVisible(dir) {
   const e = G3.eye || {x: 1, y: 0, z: 0}, n = Math.hypot(e.x, e.y, e.z) || 1;
   return (dir[0] * e.x + dir[1] * e.y + dir[2] * e.z) / n > 0.12;
@@ -433,7 +441,7 @@ function siteAnnotations() {
   return (G3.labels || []).map(t => ({
     x: t.xyz[0], y: t.xyz[1], z: t.xyz[2], text: t.label, showarrow: false, yshift: t.sel ? 16 : 12,
     font: {color: t.sel ? '#fff' : '#ddd', size: t.sel ? 12 : 11}, bgcolor: 'rgba(0,0,0,0.55)', borderpad: 2,
-    visible: siteLabelVisible(t.dir)}));
+    visible: !KEY_OFF.has(t.sel ? 6 : 5) && siteLabelVisible(t.dir)}));
 }
 function onCamera(ev) {                                   // keep label visibility in step with the view
   const cam = ev && (ev['scene.camera'] || (ev.scene && ev.scene.camera));
@@ -441,7 +449,7 @@ function onCamera(ev) {                                   // keep label visibili
   if (!eye || !G3.ready) return;
   G3.eye = eye;
   const ann = (G3.div.layout.scene.annotations || []), upd = {};
-  (G3.labels || []).forEach((t, n) => { const v = siteLabelVisible(t.dir); if (ann[n] && ann[n].visible !== v) upd[`scene.annotations[${n}].visible`] = v; });
+  (G3.labels || []).forEach((t, n) => { const v = !KEY_OFF.has(t.sel ? 6 : 5) && siteLabelVisible(t.dir); if (ann[n] && ann[n].visible !== v) upd[`scene.annotations[${n}].visible`] = v; });
   if (Object.keys(upd).length) Plotly.relayout(G3.div, upd);
 }
 function build3D() {
@@ -475,11 +483,11 @@ function build3D() {
     {type: 'mesh3d', x: [], y: [], z: [], i: [], j: [], k: [], color: SITE_C, flatshading: false, showlegend: true, hoverinfo: 'skip',
      lighting: {ambient: 0.55, diffuse: 0.7, specular: 0.5, roughness: 0.3}, lightposition: {x: 1e5, y: 1e5, z: 1e5}, name: 'Selected site'},
   ];
+  data.forEach((tr, n) => { if (KEY_OFF.has(n)) tr.visible = false; });
   const u = P.eh;                                         // look from Earth, as in the original viewer
   if (!G3.eye) G3.eye = {x: 1.7 * u[0], y: 1.7 * u[1], z: 1.7 * u[2]};
   Plotly.newPlot(G3.div, data, {
-    template: 'plotly_dark', paper_bgcolor: 'black', font: {color: '#ddd'}, margin: {l: 0, r: 0, t: 0, b: 0}, showlegend: true,
-    legend: {x: 0.5, xanchor: 'center', y: 0.9, orientation: 'h', bgcolor: 'rgba(0,0,0,0)', font: {size: 11, color: '#ddd'}},
+    template: 'plotly_dark', paper_bgcolor: 'black', font: {color: '#ddd'}, margin: {l: 0, r: 0, t: 0, b: 0}, showlegend: false,   // the key is its own panel
     scene: {xaxis: {visible: false}, yaxis: {visible: false}, zaxis: {visible: false}, aspectmode: 'data', bgcolor: 'black',
             dragmode: 'orbit', camera: {eye: G3.eye}, annotations: []},
     uirevision: 'keep',
@@ -1026,6 +1034,8 @@ $('v2d').onclick = () => setView('2d');
 $('v3d').onclick = () => setView('3d');
 function setView(v) {
   S.view = v;
+  document.body.classList.toggle('view-2d', v === '2d');
+  refitWins();                                            // the key (3D only) frees or takes space
   $('v2d').classList.toggle('active', v === '2d'); $('v3d').classList.toggle('active', v === '3d');
   G2.cv.hidden = v !== '2d'; G3.div.hidden = v !== '3d'; $('sky-hud').hidden = v !== '2d';
   $('hint').textContent = v === '2d' ? 'View from the selected site · drag to look around · scroll to zoom · double-click to re-aim'
@@ -1042,15 +1052,19 @@ window.addEventListener('resize', () => requestDraw());
 // title bar (– button or double-click), and the library can be closed. Layout is kept in localStorage.
 const LAYOUT_KEY = 'lunar.layout.v2';
 const wins = () => [...document.querySelectorAll('.win')];
+// the key first: the right-hand panels size themselves to stop above it
+const winsKeyFirst = () => wins().sort((a, b) => (b.id === 'key-panel') - (a.id === 'key-panel'));
 function defaultLayout() {
   const W = innerWidth, H = innerHeight, top = 60, out = {};
   const left = wins().filter(w => w.dataset.dock === 'left'), right = wins().filter(w => w.dataset.dock === 'right');
+  const key = $('key-panel');
   out['lib-panel'] = {x: Math.min(W - 460, 400), y: 70, w: 440, h: Math.min(640, H - 170), min: false};
   if (W < 900) {                                          // phones: all minimised, stacked down the left
-    [...left, ...right].forEach((w, i) => out[w.id] = {x: 12, y: top + i * 50, min: true});
+    [...left, ...right, key].forEach((w, i) => out[w.id] = {x: 12, y: top + i * 58, min: true, docked: false});
     out['lib-panel'] = {x: 12, y: 60, w: W - 24, h: H - 180, min: false};
     return out;
   }
+  out[key.id] = keyCorner();
   for (const [list, side] of [[left, 'left'], [right, 'right']]) {
     let y = top;
     for (const w of list) {
@@ -1058,8 +1072,28 @@ function defaultLayout() {
       out[w.id] = {x, y, min};
       y += (min ? 48 : Math.min(w.offsetHeight, H * 0.55)) + 10;
     }
+    if (side === 'right') {                               // last right panel needs ~180 px above the key
+      const lastY = list.length ? out[list[list.length - 1].id].y : top;
+      if (out[key.id].y < lastY + 190) out[key.id].min = true;
+    }
   }
   return out;
+}
+// The key sits in the bottom-right corner; when the time bar reaches that corner (narrower screens)
+// it sits just above the time bar instead.
+function keyCorner() {
+  const key = $('key-panel'), tb = document.querySelector('.timebar').getBoundingClientRect();
+  const w = key.offsetWidth || 280, h = key.offsetHeight || 130, x = innerWidth - w - 12;
+  const y = x < tb.right + 8 ? tb.top - h - 10 : innerHeight - h - 12;
+  return {x, y: Math.max(60, y), min: false, docked: true};
+}
+// Space the right-hand panels leave free at the bottom so they stop above the key.
+function bottomReserve(w) {
+  const key = $('key-panel');
+  if (w.dataset.dock !== 'right' || S.view === '2d') return 100;
+  const k = key.getBoundingClientRect(), r = w.getBoundingClientRect();
+  const overlapX = k.left < r.right && k.right > r.left;
+  return overlapX ? Math.max(100, innerHeight - k.top + 10) : 100;
 }
 function applyWin(w, st) {
   const min = !!st.min;
@@ -1068,14 +1102,20 @@ function applyWin(w, st) {
   b.innerHTML = min ? '&#9634;' : '&#8211;'; b.title = min ? 'Restore' : 'Minimize';
   if (st.w) { w.dataset.w = st.w; w.style.width = `${clamp(st.w, 240, innerWidth - 8)}px`; }
   if (st.h) w.dataset.h = st.h;
+  if ('docked' in st) w.dataset.docked = st.docked ? '1' : '';
+  if (w.dataset.docked === '1') { const c = keyCorner(); st = {...st, x: c.x, y: c.y}; }   // key stays in its corner until moved
   const x = clamp(st.x, 80 - w.offsetWidth, innerWidth - 80), y = clamp(st.y, 0, innerHeight - 44);
   w.style.left = `${x}px`; w.style.top = `${y}px`;
   const room = Math.max(120, innerHeight - y - 8);
   if (min) { w.style.height = ''; w.style.maxHeight = ''; }
   else if (w.dataset.h) { w.style.height = `${clamp(+w.dataset.h, 120, room)}px`; w.style.maxHeight = ''; }
-  else { w.style.height = ''; w.style.maxHeight = `${Math.max(160, innerHeight - y - 100)}px`; }
+  else {                                                  // stop above the key when it shares the column (body scrolls)
+    const res = bottomReserve(w);
+    w.style.height = ''; w.style.maxHeight = `${Math.max(res > 100 ? 90 : 160, innerHeight - y - res)}px`;
+  }
 }
-const winState = w => ({x: w.offsetLeft, y: w.offsetTop, min: w.classList.contains('min'),
+const refitWins = () => winsKeyFirst().forEach(w => applyWin(w, winState(w)));
+const winState = w => ({x: w.offsetLeft, y: w.offsetTop, min: w.classList.contains('min'), docked: w.dataset.docked === '1',
                         w: w.dataset.w ? +w.dataset.w : undefined, h: w.dataset.h ? +w.dataset.h : undefined});
 function saveLayout() {
   const o = {}; wins().forEach(w => o[w.id] = winState(w));
@@ -1087,7 +1127,7 @@ function initWindows(reset = false) {
   wins().forEach(w => { w.classList.remove('min'); w.style.maxHeight = ''; w.style.height = ''; w.style.width = '';
                         delete w.dataset.w; delete w.dataset.h; });
   const def = defaultLayout();
-  wins().forEach(w => applyWin(w, (saved && saved[w.id]) || def[w.id]));
+  winsKeyFirst().forEach(w => applyWin(w, (saved && saved[w.id]) || def[w.id]));
   if (reset) saveLayout();
   updateMinAll();
 }
@@ -1108,9 +1148,9 @@ wins().forEach(w => {
     if (ev.target.closest('button, input')) return;
     const r = w.getBoundingClientRect(), dx = ev.clientX - r.left, dy = ev.clientY - r.top;
     head.setPointerCapture(ev.pointerId); w.classList.add('dragging');
-    const move = e => applyWin(w, {...winState(w), x: e.clientX - dx, y: e.clientY - dy});
+    const move = e => applyWin(w, {...winState(w), x: e.clientX - dx, y: e.clientY - dy, docked: false});
     const up = () => { head.removeEventListener('pointermove', move); head.removeEventListener('pointerup', up);
-                       w.classList.remove('dragging'); saveLayout(); };
+                       w.classList.remove('dragging'); if (w.id === 'key-panel') refitWins(); saveLayout(); };
     head.addEventListener('pointermove', move); head.addEventListener('pointerup', up);
   });
   grip.addEventListener('pointerdown', ev => {
@@ -1123,17 +1163,18 @@ wins().forEach(w => {
     grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up);
   });
   grip.addEventListener('dblclick', () => { delete w.dataset.w; delete w.dataset.h; w.style.width = ''; applyWin(w, winState(w)); saveLayout(); });
-  const toggle = () => { applyWin(w, {...winState(w), min: !w.classList.contains('min')}); saveLayout(); updateMinAll(); requestDraw(); };
+  const toggle = () => { applyWin(w, {...winState(w), min: !w.classList.contains('min')}); if (w.id === 'key-panel') refitWins();
+                        saveLayout(); updateMinAll(); requestDraw(); };
   w.querySelector('.win-min').addEventListener('click', toggle);
   head.addEventListener('dblclick', ev => { if (!ev.target.closest('button, input')) toggle(); });
 });
 $('reset-layout').onclick = () => initWindows(true);
 $('min-all').onclick = () => {
   const minimise = wins().some(w => !w.hidden && !w.classList.contains('min'));
-  wins().filter(w => !w.hidden).forEach(w => applyWin(w, {...winState(w), min: minimise}));
+  winsKeyFirst().filter(w => !w.hidden).forEach(w => applyWin(w, {...winState(w), min: minimise}));
   saveLayout(); updateMinAll(); if (S.calc) { aimSky(); requestDraw(); }
 };
-window.addEventListener('resize', () => wins().forEach(w => applyWin(w, winState(w))));
+window.addEventListener('resize', refitWins);
 initWindows();
 
 init();

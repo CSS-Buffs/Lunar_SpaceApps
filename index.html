@@ -181,6 +181,23 @@
   </div>
 </section>
 
+<section class="win" id="key-panel" data-dock="corner">
+  <header class="win-head">
+    <div><h2>Key</h2><div class="sub">Click an item to show or hide it</div></div>
+    <div class="win-tools"><button class="win-min" aria-label="Minimize">&#8211;</button></div>
+  </header>
+  <div class="win-body">
+    <div class="key-grid">
+      <button class="key-item" data-trace="1" title="Show or hide the Sun's path"><svg viewBox="0 0 28 12"><line x1="1" y1="6" x2="27" y2="6" stroke="var(--sun)" stroke-width="2" stroke-dasharray="1.5 3" stroke-linecap="round"/></svg>Sun path</button>
+      <button class="key-item" data-trace="3" title="Show or hide the Sun"><svg viewBox="0 0 28 12"><line x1="1" y1="6" x2="20" y2="6" stroke="var(--sun)" stroke-width="2.5"/><circle cx="21" cy="6" r="5" fill="var(--sun)"/></svg>Sun</button>
+      <button class="key-item" data-trace="2" title="Show or hide Earth's path"><svg viewBox="0 0 28 12"><line x1="1" y1="6" x2="27" y2="6" stroke="var(--earth)" stroke-width="2" stroke-dasharray="1.5 3" stroke-linecap="round"/></svg>Earth path</button>
+      <button class="key-item" data-trace="4" title="Show or hide Earth"><svg viewBox="0 0 28 12"><line x1="1" y1="6" x2="20" y2="6" stroke="var(--earth)" stroke-width="2.5"/><circle cx="21" cy="6" r="4.5" fill="var(--earth)"/></svg>Earth</button>
+      <button class="key-item" data-trace="5" title="Show or hide saved sites"><svg viewBox="0 0 28 12"><defs><radialGradient id="kg-w" cx=".35" cy=".35" r=".7"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#8a8a8a"/></radialGradient></defs><circle cx="14" cy="6" r="4.5" fill="url(#kg-w)"/></svg>Saved sites</button>
+      <button class="key-item" data-trace="6" title="Show or hide the selected site"><svg viewBox="0 0 28 12"><defs><radialGradient id="kg-r" cx=".35" cy=".35" r=".7"><stop offset="0" stop-color="#ffb3c0"/><stop offset="1" stop-color="#c0223f"/></radialGradient></defs><circle cx="14" cy="6" r="5.5" fill="url(#kg-r)"/></svg>Selected site</button>
+    </div>
+  </div>
+</section>
+
 <!-- ============================ TIME BAR ============================ -->
 <section class="timebar">
   <div class="tb-row">
