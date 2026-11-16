@@ -1,5 +1,4 @@
 # Lunar_SpaceApps: a data-driven 3D Moon and orbit simulator
--------------------------------------------------------------------------------
 How to Use:
 Click this link and walk through our project - https://cssbuffslunarexplorationguide.us/
 -------------------------------------------------------------------------------
